@@ -190,7 +190,7 @@ pub struct RnConfig {
 
 pub fn rn_config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".config/simon/rn.json")
+    PathBuf::from(home).join(".config/metroctl/config.json")
 }
 
 pub fn load_rn_config() -> Result<Option<RnConfig>> {

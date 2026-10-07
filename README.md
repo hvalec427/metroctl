@@ -15,12 +15,17 @@ metroctl logs     # just the React Native log viewer (see docs/logs.md)
 
 ## Install
 
-Not in a packaged installer yet — build it from source (needs Rust + macOS/Xcode/
-Android tooling, same as simon):
+```sh
+curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/main/install.sh | sh
+```
+
+Grab the binary from the [latest release](https://github.com/hvalec427/metroctl/releases/latest), or the bleeding edge with `… | sh -s -- dev`. Re-run the installer to update. Uninstall:
 
 ```sh
-cargo install --git https://github.com/hvalec427/metroctl
+curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/main/uninstall.sh | sh
 ```
+
+Prefer source? `cargo install --git https://github.com/hvalec427/metroctl`.
 
 > **macOS only.** Booting simulators and streaming device logs rely on macOS
 > tooling (`xcrun`, `simctl`, `adb`), via simon.
@@ -30,7 +35,7 @@ cargo install --git https://github.com/hvalec427/metroctl
 1. From your project root, register it:
    ```sh
    cd ~/dev/my-rn-app
-   metroctl init          # adds this project to ~/.config/simon/rn.json
+   metroctl init          # adds this project to ~/.config/metroctl/config.json
    ```
    `init` detects your package manager and prints the commands it will run, so for
    a standard project you're already done.
@@ -47,8 +52,8 @@ cargo install --git https://github.com/hvalec427/metroctl
 
 ## Config
 
-Projects live in `~/.config/simon/rn.json`, a registry keyed by repo root.
-`metroctl` picks the project whose `root` is a prefix of your current directory,
+Projects live in `~/.config/metroctl/config.json`, a registry keyed by repo root.
+metroctl picks the project whose `root` is a prefix of your current directory,
 so you just `cd` into a repo and run `metroctl`.
 
 `metroctl init` scaffolds a minimal entry; everything else falls back to sensible
@@ -82,7 +87,7 @@ Anything omitted is derived:
 | yarn | `yarn start` | `yarn ios` | `yarn android` |
 | pnpm | `pnpm start` | `pnpm ios` | `pnpm android` |
 
-**Port in one place.** Set `metro.port` and nothing else — simon connects its log
+**Port in one place.** Set `metro.port` and nothing else — metroctl connects its log
 feed to that port *and* exports it as `RCT_METRO_PORT` into every command it runs,
 so Metro and your builds use the same port. It defaults to `8081`.
 
