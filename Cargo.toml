@@ -1,0 +1,29 @@
+[package]
+name = "metroctl"
+version = "0.0.0"
+edition = "2021"
+description = "React Native project dashboard (Metro, devices, logs) — built on simon"
+default-run = "metroctl"
+
+[[bin]]
+name = "metroctl"
+path = "src/main.rs"
+
+[dependencies]
+# Device management lives in simon (its own repo); track its develop branch.
+simon = { git = "https://github.com/hvalec427/simon", branch = "develop" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+inquire = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "http2"] }
+tungstenite = "0.24"
+ratatui = "0.29"
+crossterm = "0.28"
+portable-pty = "0.8"
+vt100 = "0.15"
+
+[profile.release]
+strip = true
+lto = true
