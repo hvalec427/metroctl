@@ -8,8 +8,24 @@ use crate::rn::{connect_cdp, fetch_targets};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+/// Optional CDP wire trace. Set METROCTL_CDP_DEBUG=/path/to/log to append every
+/// frame sent/received (and anything `await_result` drops) for debugging the
+/// Hermes/fusebox handshake. Resolved once per process.
+static CDP_TRACE: OnceLock<Option<String>> = OnceLock::new();
+
+fn cdp_trace(tag: &str, msg: &str) {
+    let path = CDP_TRACE.get_or_init(|| std::env::var("METROCTL_CDP_DEBUG").ok());
+    if let Some(p) = path {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            let trimmed: String = msg.chars().take(600).collect();
+            let _ = writeln!(f, "{tag} {trimmed}");
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
@@ -168,6 +184,10 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
     send(&mut socket, "Log.enable");
     send(&mut socket, "Network.enable");
     send(&mut socket, "Debugger.enable");
+    // If Hermes started paused waiting for a debugger, let it run; harmless on an
+    // already-running VM.
+    send(&mut socket, "Runtime.runIfWaitingForDebugger");
+    cdp_trace("--", &format!("connected {key}: sent Runtime/Log/Network/Debugger.enable + runIfWaitingForDebugger"));
     let _ = tx.send(RnEvent::Status(key.into(), Status::Connected));
     let _ = tx.send(RnEvent::Network(key.into(), true));
 
@@ -219,6 +239,7 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
         }
         match socket.read() {
             Ok(tungstenite::Message::Text(t)) => {
+                cdp_trace("<<", &t);
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
                     handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused);
                 }
@@ -235,6 +256,7 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
 /// Send a parameterless Debugger command, allocating a fresh request id.
 fn debug_cmd(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, seq: &mut i64, method: &str) {
     *seq += 1;
+    cdp_trace(">>", method);
     let _ = socket.send(tungstenite::Message::Text(json!({"id": *seq, "method": method}).to_string()));
 }
 
@@ -519,6 +541,9 @@ fn await_result(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTl
                         return v.get("result").cloned();
                     }
                 }
+                // Non-matching frame read mid-request is silently discarded here —
+                // trace it so we can see if a Debugger.paused gets eaten.
+                cdp_trace("DROP", &t);
             }
             Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
             _ => return None,
