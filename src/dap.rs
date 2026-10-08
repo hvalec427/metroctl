@@ -103,13 +103,30 @@ fn session(stream: TcpStream, senders: Senders) -> std::io::Result<()> {
             }
             "stackTrace" => {
                 let fr = frames.lock().unwrap();
-                let sframes: Vec<Value> = fr.iter().enumerate().map(|(i, f)| json!({
-                    "id": i,
-                    "name": f.name,
-                    "line": f.line,
-                    "column": f.column.max(1),
-                    "source": { "path": f.file, "name": basename(&f.file) },
-                })).collect();
+                let sframes: Vec<Value> = fr.iter().enumerate().map(|(i, f)| {
+                    // Only frames that map to a real local source file are
+                    // navigable. Internal/bundle frames come back as http(s)
+                    // URLs — the editor must NOT try to open those (it fetches
+                    // the whole bundle and the generated line is out of range).
+                    let navigable = !f.file.is_empty() && !f.file.contains("://");
+                    if navigable {
+                        json!({
+                            "id": i,
+                            "name": f.name,
+                            "line": f.line,
+                            "column": f.column.max(1),
+                            "source": { "path": f.file, "name": basename(&f.file) },
+                        })
+                    } else {
+                        json!({
+                            "id": i,
+                            "name": f.name,
+                            "line": 0,
+                            "column": 0,
+                            "presentationHint": "subtle",
+                        })
+                    }
+                }).collect();
                 let total = sframes.len();
                 respond(&writer, &seq, req_seq, &command, json!({"stackFrames": sframes, "totalFrames": total}));
             }
