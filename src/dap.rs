@@ -41,6 +41,12 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink) -> std::i
     let writer: Writer = Arc::new(Mutex::new(stream.try_clone()?));
     let seq: Seq = Arc::new(Mutex::new(1));
     let frames: Arc<Mutex<Vec<super::DapFrame>>> = Arc::new(Mutex::new(Vec::new()));
+    // Raw CDP callFrames of the current pause (scopeChain + objectIds for
+    // scopes/variables). variablesReference → CDP objectId, rebuilt per pause
+    // since objectIds die on resume.
+    let raw: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
+    let var_refs: Arc<Mutex<HashMap<i64, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let next_ref: Arc<Mutex<i64>> = Arc::new(Mutex::new(1000));
     let mut reader = BufReader::new(stream);
 
     let (de_tx, de_rx) = channel::<DebugEvent>();
@@ -66,11 +72,14 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink) -> std::i
                 // Pump debugger notifications → DAP events (once).
                 if let Some(rx) = de_rx.take() {
                     let (w, sq, fr) = (writer.clone(), seq.clone(), frames.clone());
+                    let (rawc, refs) = (raw.clone(), var_refs.clone());
                     std::thread::spawn(move || {
                         for ev in rx {
                             match ev {
-                                DebugEvent::Paused { frames: f, reason } => {
+                                DebugEvent::Paused { frames: f, reason, raw_frames } => {
                                     *fr.lock().unwrap() = f;
+                                    *rawc.lock().unwrap() = raw_frames;
+                                    refs.lock().unwrap().clear(); // objectIds are per-pause
                                     event(&w, &sq, "stopped", json!({
                                         "reason": map_reason(&reason),
                                         "threadId": 1,
@@ -78,6 +87,7 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink) -> std::i
                                     }));
                                 }
                                 DebugEvent::Resumed => {
+                                    refs.lock().unwrap().clear();
                                     event(&w, &sq, "continued", json!({"threadId": 1, "allThreadsContinued": true}));
                                 }
                             }
@@ -128,9 +138,49 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink) -> std::i
                 let total = sframes.len();
                 respond(&writer, &seq, req_seq, &command, json!({"stackFrames": sframes, "totalFrames": total}));
             }
-            // Scopes/variables arrive in 2b; empty keeps the editor happy.
-            "scopes" => respond(&writer, &seq, req_seq, &command, json!({"scopes": []})),
-            "variables" => respond(&writer, &seq, req_seq, &command, json!({"variables": []})),
+            "scopes" => {
+                let frame_id = msg["arguments"]["frameId"].as_i64().unwrap_or(0);
+                let chain = raw
+                    .lock()
+                    .unwrap()
+                    .get(frame_id as usize)
+                    .and_then(|f| f["scopeChain"].as_array().cloned())
+                    .unwrap_or_default();
+                let scopes: Vec<Value> = chain
+                    .iter()
+                    .filter_map(|sc| {
+                        let oid = sc["object"]["objectId"].as_str().filter(|s| !s.is_empty())?;
+                        let kind = sc["type"].as_str().unwrap_or("scope");
+                        let name = sc["name"].as_str().map(|s| s.to_string()).unwrap_or_else(|| cap(kind));
+                        Some(json!({
+                            "name": name,
+                            "variablesReference": alloc_ref(&var_refs, &next_ref, oid),
+                            "expensive": kind == "global",
+                            "presentationHint": kind,
+                        }))
+                    })
+                    .collect();
+                respond(&writer, &seq, req_seq, &command, json!({"scopes": scopes}));
+            }
+            "variables" => {
+                let vref = msg["arguments"]["variablesReference"].as_i64().unwrap_or(0);
+                let object_id = var_refs.lock().unwrap().get(&vref).cloned();
+                let mut vars = Vec::new();
+                if let Some(oid) = object_id {
+                    let result = debug_request(&senders, "Runtime.getProperties", json!({"objectId": oid, "ownProperties": true, "generatePreview": true}));
+                    if let Some(props) = result["result"].as_array() {
+                        for p in props {
+                            if p["enumerable"].as_bool() == Some(false) {
+                                continue;
+                            }
+                            let name = p["name"].as_str().unwrap_or("").to_string();
+                            let (display, child) = describe_value(&p["value"], &var_refs, &next_ref);
+                            vars.push(json!({ "name": name, "value": display, "variablesReference": child }));
+                        }
+                    }
+                }
+                respond(&writer, &seq, req_seq, &command, json!({"variables": vars}));
+            }
             "continue" => {
                 step(&senders, ConnCmd::Continue);
                 respond(&writer, &seq, req_seq, &command, json!({"allThreadsContinued": true}));
@@ -194,6 +244,64 @@ fn step(senders: &Senders, cmd: ConnCmd) {
     if let Some(s) = senders.lock().unwrap().values().next() {
         let _ = s.send(cmd);
     }
+}
+
+/// Synchronous CDP call via the current target; returns the CDP `result` (or Null).
+fn debug_request(senders: &Senders, method: &str, params: Value) -> Value {
+    let (tx, rx) = channel::<Value>();
+    {
+        let map = senders.lock().unwrap();
+        match map.values().next() {
+            Some(s) => {
+                let _ = s.send(ConnCmd::DebugRequest { method: method.to_string(), params, reply: tx });
+            }
+            None => return Value::Null,
+        }
+    }
+    rx.recv_timeout(Duration::from_secs(3)).unwrap_or(Value::Null)
+}
+
+/// Allocate a fresh variablesReference pointing at a CDP objectId.
+fn alloc_ref(refs: &Arc<Mutex<HashMap<i64, String>>>, next: &Arc<Mutex<i64>>, object_id: &str) -> i64 {
+    let id = {
+        let mut n = next.lock().unwrap();
+        let v = *n;
+        *n += 1;
+        v
+    };
+    refs.lock().unwrap().insert(id, object_id.to_string());
+    id
+}
+
+fn cap(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// A CDP RemoteObject → (display string, child variablesReference). Objects and
+/// functions with an objectId are expandable; everything else is a leaf (ref 0).
+fn describe_value(v: &Value, refs: &Arc<Mutex<HashMap<i64, String>>>, next: &Arc<Mutex<i64>>) -> (String, i64) {
+    let ty = v["type"].as_str().unwrap_or("");
+    let display = if let Some(s) = v["value"].as_str() {
+        format!("\"{s}\"")
+    } else if !v["value"].is_null() {
+        v["value"].to_string()
+    } else if let Some(d) = v["description"].as_str() {
+        d.to_string()
+    } else if ty == "undefined" {
+        "undefined".to_string()
+    } else {
+        ty.to_string()
+    };
+    let child = if (ty == "object" || ty == "function") && v["objectId"].is_string() {
+        alloc_ref(refs, next, v["objectId"].as_str().unwrap())
+    } else {
+        0
+    };
+    (display, child)
 }
 
 // ── DAP wire protocol (Content-Length framed JSON, like LSP) ──────────────────

@@ -45,7 +45,7 @@ pub struct DapFrame {
 /// Async debugger notifications pushed to an attached DAP session (one per
 /// connected editor). Separate from `RnEvent`, which drives the TUI.
 pub enum DebugEvent {
-    Paused { frames: Vec<DapFrame>, reason: String },
+    Paused { frames: Vec<DapFrame>, reason: String, raw_frames: Value },
     Resumed,
 }
 
@@ -136,6 +136,9 @@ pub enum ConnCmd {
     StepInto,
     StepOut,
     Pause,
+    /// Synchronous CDP call on behalf of a DAP session (scopes/variables/eval):
+    /// send `method`+`params`, reply with the CDP `result`.
+    DebugRequest { method: String, params: Value, reply: Sender<Value> },
 }
 
 pub struct RnClient {
@@ -273,6 +276,17 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
                 ConnCmd::StepInto => debug_cmd(&mut socket, &mut seq, "Debugger.stepInto"),
                 ConnCmd::StepOut => debug_cmd(&mut socket, &mut seq, "Debugger.stepOut"),
                 ConnCmd::Pause => debug_cmd(&mut socket, &mut seq, "Debugger.pause"),
+                ConnCmd::DebugRequest { method, params, reply } => {
+                    seq += 1;
+                    let rid = seq;
+                    cdp_trace(">>", &method);
+                    let _ = socket.send(tungstenite::Message::Text(
+                        json!({"id": rid, "method": method, "params": params}).to_string(),
+                    ));
+                    let result = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, debug_sink)
+                        .unwrap_or(Value::Null);
+                    let _ = reply.send(result);
+                }
             }
         }
         match socket.read() {
@@ -370,7 +384,11 @@ fn handle_message(
             let (file, line) = dap_frames.first().map(|f| (f.file.clone(), f.line)).unwrap_or_default();
             let _ = tx.send(RnEvent::Paused(key.into(), PausedInfo { file, line, reason: reason.clone() }));
             if let Some(de) = debug_sink.lock().unwrap().as_ref() {
-                let _ = de.send(DebugEvent::Paused { frames: dap_frames, reason });
+                let _ = de.send(DebugEvent::Paused {
+                    frames: dap_frames,
+                    reason,
+                    raw_frames: msg["params"]["callFrames"].clone(),
+                });
             }
         }
         "Debugger.resumed" => {
