@@ -47,8 +47,13 @@ pub struct DapFrame {
 pub enum DebugEvent {
     Paused { frames: Vec<DapFrame>, reason: String },
     Resumed,
-    Terminated,
 }
+
+/// Shared slot holding the attached DAP session's event stream. It lives above
+/// the per-target connection, so a Metro reload — which tears down and respawns
+/// that connection — doesn't detach the editor. Each (re)connected `conn_loop`
+/// reads this to know where to fan Debugger events.
+pub type DebugSink = Arc<Mutex<Option<Sender<DebugEvent>>>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
@@ -131,9 +136,6 @@ pub enum ConnCmd {
     StepInto,
     StepOut,
     Pause,
-    /// A DAP session attaches its event stream; the connection fans
-    /// Debugger.paused/resumed/terminated to it.
-    AttachDebugger { events: Sender<DebugEvent> },
 }
 
 pub struct RnClient {
@@ -146,12 +148,14 @@ impl RnClient {
     pub fn start(port: u16) -> RnClient {
         let (tx, rx) = std::sync::mpsc::channel();
         let cmd_senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let debug_sink: DebugSink = Arc::new(Mutex::new(None));
         let senders = cmd_senders.clone();
         let evt = tx.clone();
-        std::thread::spawn(move || poll_loop(port, evt, senders));
+        let sink = debug_sink.clone();
+        std::thread::spawn(move || poll_loop(port, evt, senders, sink));
         // Expose this metroctl's single Hermes debugger to editors over DAP.
         let dap_senders = cmd_senders.clone();
-        std::thread::spawn(move || dap::serve(dap_senders));
+        std::thread::spawn(move || dap::serve(dap_senders, debug_sink));
         RnClient { rx, cmd_senders, port }
     }
 
@@ -166,7 +170,7 @@ impl RnClient {
     }
 }
 
-fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>) {
+fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>, debug_sink: DebugSink) {
     loop {
         if let Ok(targets) = fetch_targets(port) {
             let live: Vec<_> = targets.into_iter().filter(|t| t.web_socket_debugger_url.is_some()).collect();
@@ -181,8 +185,9 @@ fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, 
                     let url = t.web_socket_debugger_url.clone().unwrap();
                     let tx2 = tx.clone();
                     let senders2 = senders.clone();
+                    let sink = debug_sink.clone();
                     std::thread::spawn(move || {
-                        conn_loop(&key, &url, port, &tx2, crx);
+                        conn_loop(&key, &url, port, &tx2, crx, &sink);
                         senders2.lock().unwrap().remove(&key); // allow reconnection on next poll
                     });
                 }
@@ -192,7 +197,7 @@ fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, 
     }
 }
 
-fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receiver<ConnCmd>) {
+fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receiver<ConnCmd>, debug_sink: &DebugSink) {
     let _ = tx.send(RnEvent::Status(key.into(), Status::Connecting));
     let mut socket = match connect_cdp(url, port) {
         Ok(s) => s,
@@ -230,8 +235,6 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
     // sampler's `Runtime.evaluate` — it either queues behind the pause or
     // disturbs it. Set on `Debugger.paused`, cleared on `Debugger.resumed`.
     let mut paused = false;
-    // Set when a DAP editor attaches; Debugger events are fanned here too.
-    let mut debug_events: Option<Sender<DebugEvent>> = None;
     const FPS_EXPR: &str = "(function(){var s=globalThis.__simonFps;if(!s){s=globalThis.__simonFps={v:0,c:0,t:Date.now()};var loop=function(){s.c++;var n=Date.now();if(n-s.t>=1000){s.v=Math.round(s.c*1000/(n-s.t));s.c=0;s.t=n;}(globalThis.requestAnimationFrame||function(f){return setTimeout(f,16);})(loop);};loop();}return s.v;})()";
 
     loop {
@@ -241,13 +244,13 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
             seq += 1;
             let rid = seq;
             let _ = socket.send(tungstenite::Message::Text(json!({"id": rid, "method": "Runtime.evaluate", "params": {"expression": FPS_EXPR, "returnByValue": true}}).to_string()));
-            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, &debug_events) {
+            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, debug_sink) {
                 sample.fps = r["result"]["value"].as_i64();
             }
             seq += 1;
             let rid = seq;
             let _ = socket.send(tungstenite::Message::Text(json!({"id": rid, "method": "Runtime.getHeapUsage"}).to_string()));
-            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, &debug_events) {
+            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, debug_sink) {
                 sample.heap_used = r["usedSize"].as_i64();
                 sample.heap_total = r["totalSize"].as_i64();
             }
@@ -270,18 +273,13 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
                 ConnCmd::StepInto => debug_cmd(&mut socket, &mut seq, "Debugger.stepInto"),
                 ConnCmd::StepOut => debug_cmd(&mut socket, &mut seq, "Debugger.stepOut"),
                 ConnCmd::Pause => debug_cmd(&mut socket, &mut seq, "Debugger.pause"),
-                ConnCmd::AttachDebugger { events } => {
-                    debug_events = Some(events);
-                    // Re-assert the Debugger domain for the freshly attached session.
-                    debug_cmd(&mut socket, &mut seq, "Debugger.enable");
-                }
             }
         }
         match socket.read() {
             Ok(tungstenite::Message::Text(t)) => {
                 cdp_trace("<<", &t);
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused, &mut scripts, &debug_events);
+                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused, &mut scripts, debug_sink);
                 }
             }
             Ok(tungstenite::Message::Close(_)) => break,
@@ -289,9 +287,6 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
             Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(_) => break,
         }
-    }
-    if let Some(de) = &debug_events {
-        let _ = de.send(DebugEvent::Terminated);
     }
     let _ = tx.send(RnEvent::Status(key.into(), Status::Disconnected));
 }
@@ -333,7 +328,7 @@ fn request_response(
     port: u16,
     paused: &mut bool,
     scripts: &mut HashMap<String, String>,
-    debug_events: &Option<Sender<DebugEvent>>,
+    debug_sink: &DebugSink,
 ) -> Option<Value> {
     for _ in 0..50 {
         match socket.read() {
@@ -343,7 +338,7 @@ fn request_response(
                     if v.get("id").and_then(|i| i.as_i64()) == Some(id) {
                         return v.get("result").cloned();
                     }
-                    handle_message(key, &v, tx, records, socket, seq, port, paused, scripts, debug_events);
+                    handle_message(key, &v, tx, records, socket, seq, port, paused, scripts, debug_sink);
                 }
             }
             Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
@@ -363,7 +358,7 @@ fn handle_message(
     port: u16,
     paused: &mut bool,
     scripts: &mut HashMap<String, String>,
-    debug_events: &Option<Sender<DebugEvent>>,
+    debug_sink: &DebugSink,
 ) {
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     match method {
@@ -374,14 +369,14 @@ fn handle_message(
             let dap_frames = symbolicate_frames(port, &frames, scripts);
             let (file, line) = dap_frames.first().map(|f| (f.file.clone(), f.line)).unwrap_or_default();
             let _ = tx.send(RnEvent::Paused(key.into(), PausedInfo { file, line, reason: reason.clone() }));
-            if let Some(de) = debug_events {
+            if let Some(de) = debug_sink.lock().unwrap().as_ref() {
                 let _ = de.send(DebugEvent::Paused { frames: dap_frames, reason });
             }
         }
         "Debugger.resumed" => {
             *paused = false;
             let _ = tx.send(RnEvent::Resumed(key.into()));
-            if let Some(de) = debug_events {
+            if let Some(de) = debug_sink.lock().unwrap().as_ref() {
                 let _ = de.send(DebugEvent::Resumed);
             }
         }

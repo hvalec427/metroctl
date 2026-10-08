@@ -8,7 +8,7 @@
 //! Breakpoints set from the editor (source-map mapping) and scopes/variables
 //! come next; for now `debugger;` statements drive the stops.
 
-use super::{ConnCmd, DebugEvent};
+use super::{ConnCmd, DebugEvent, DebugSink};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -21,7 +21,7 @@ type Senders = Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>;
 type Writer = Arc<Mutex<TcpStream>>;
 type Seq = Arc<Mutex<i64>>;
 
-pub fn serve(senders: Senders) {
+pub fn serve(senders: Senders, debug_sink: DebugSink) {
     let port: u16 = std::env::var("METROCTL_DAP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9223);
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -30,13 +30,14 @@ pub fn serve(senders: Senders) {
     };
     for stream in listener.incoming().flatten() {
         let senders = senders.clone();
+        let sink = debug_sink.clone();
         std::thread::spawn(move || {
-            let _ = session(stream, senders);
+            let _ = session(stream, senders, sink);
         });
     }
 }
 
-fn session(stream: TcpStream, senders: Senders) -> std::io::Result<()> {
+fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink) -> std::io::Result<()> {
     let writer: Writer = Arc::new(Mutex::new(stream.try_clone()?));
     let seq: Seq = Arc::new(Mutex::new(1));
     let frames: Arc<Mutex<Vec<super::DapFrame>>> = Arc::new(Mutex::new(Vec::new()));
@@ -44,7 +45,6 @@ fn session(stream: TcpStream, senders: Senders) -> std::io::Result<()> {
 
     let (de_tx, de_rx) = channel::<DebugEvent>();
     let mut de_rx = Some(de_rx);
-    let mut target: Option<String> = None;
 
     while let Some(msg) = read_message(&mut reader)? {
         let command = msg["command"].as_str().unwrap_or("").to_string();
@@ -58,10 +58,11 @@ fn session(stream: TcpStream, senders: Senders) -> std::io::Result<()> {
                 event(&writer, &seq, "initialized", json!({}));
             }
             "attach" | "launch" => {
-                target = wait_for_target(&senders);
-                if let Some(k) = &target {
-                    send_cmd(&senders, k, ConnCmd::AttachDebugger { events: de_tx.clone() });
-                }
+                let _ = wait_for_target(&senders);
+                // Register our event stream in the shared slot; every current
+                // and future Hermes connection fans Debugger events here, so a
+                // Metro reload doesn't detach us.
+                *debug_sink.lock().unwrap() = Some(de_tx.clone());
                 // Pump debugger notifications → DAP events (once).
                 if let Some(rx) = de_rx.take() {
                     let (w, sq, fr) = (writer.clone(), seq.clone(), frames.clone());
@@ -78,9 +79,6 @@ fn session(stream: TcpStream, senders: Senders) -> std::io::Result<()> {
                                 }
                                 DebugEvent::Resumed => {
                                     event(&w, &sq, "continued", json!({"threadId": 1, "allThreadsContinued": true}));
-                                }
-                                DebugEvent::Terminated => {
-                                    event(&w, &sq, "terminated", json!({}));
                                 }
                             }
                         }
@@ -134,23 +132,23 @@ fn session(stream: TcpStream, senders: Senders) -> std::io::Result<()> {
             "scopes" => respond(&writer, &seq, req_seq, &command, json!({"scopes": []})),
             "variables" => respond(&writer, &seq, req_seq, &command, json!({"variables": []})),
             "continue" => {
-                step(&senders, &target, ConnCmd::Continue);
+                step(&senders, ConnCmd::Continue);
                 respond(&writer, &seq, req_seq, &command, json!({"allThreadsContinued": true}));
             }
             "next" => {
-                step(&senders, &target, ConnCmd::StepOver);
+                step(&senders, ConnCmd::StepOver);
                 respond(&writer, &seq, req_seq, &command, json!({}));
             }
             "stepIn" => {
-                step(&senders, &target, ConnCmd::StepInto);
+                step(&senders, ConnCmd::StepInto);
                 respond(&writer, &seq, req_seq, &command, json!({}));
             }
             "stepOut" => {
-                step(&senders, &target, ConnCmd::StepOut);
+                step(&senders, ConnCmd::StepOut);
                 respond(&writer, &seq, req_seq, &command, json!({}));
             }
             "pause" => {
-                step(&senders, &target, ConnCmd::Pause);
+                step(&senders, ConnCmd::Pause);
                 respond(&writer, &seq, req_seq, &command, json!({}));
             }
             "disconnect" | "terminate" => {
@@ -161,6 +159,8 @@ fn session(stream: TcpStream, senders: Senders) -> std::io::Result<()> {
             other => respond(&writer, &seq, req_seq, other, json!({})),
         }
     }
+    // Editor disconnected — stop fanning events to a dead stream.
+    *debug_sink.lock().unwrap() = None;
     Ok(())
 }
 
@@ -187,14 +187,11 @@ fn wait_for_target(senders: &Senders) -> Option<String> {
     None
 }
 
-fn step(senders: &Senders, target: &Option<String>, cmd: ConnCmd) {
-    if let Some(k) = target {
-        send_cmd(senders, k, cmd);
-    }
-}
-
-fn send_cmd(senders: &Senders, key: &str, cmd: ConnCmd) {
-    if let Some(s) = senders.lock().unwrap().get(key) {
+/// Send a command to the current (single) Hermes target. Resolving the sender
+/// fresh each call means step/continue survive a Metro reload that swaps the
+/// underlying connection.
+fn step(senders: &Senders, cmd: ConnCmd) {
+    if let Some(s) = senders.lock().unwrap().values().next() {
         let _ = s.send(cmd);
     }
 }
