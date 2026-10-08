@@ -192,6 +192,10 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
     let _ = tx.send(RnEvent::Network(key.into(), true));
 
     let mut records: HashMap<String, NetRecord> = HashMap::new();
+    // scriptId → bundle URL. Debugger.paused callFrames carry only a scriptId,
+    // so we learn URLs from console/exception stacks and scriptParsed to map a
+    // pause back to a source location.
+    let mut scripts: HashMap<String, String> = HashMap::new();
     let mut last_perf = std::time::Instant::now() - Duration::from_secs(2);
     // While suspended at a breakpoint we must not poke the VM with the perf
     // sampler's `Runtime.evaluate` — it either queues behind the pause or
@@ -206,13 +210,13 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
             seq += 1;
             let rid = seq;
             let _ = socket.send(tungstenite::Message::Text(json!({"id": rid, "method": "Runtime.evaluate", "params": {"expression": FPS_EXPR, "returnByValue": true}}).to_string()));
-            if let Some(r) = await_result(&mut socket, rid) {
+            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts) {
                 sample.fps = r["result"]["value"].as_i64();
             }
             seq += 1;
             let rid = seq;
             let _ = socket.send(tungstenite::Message::Text(json!({"id": rid, "method": "Runtime.getHeapUsage"}).to_string()));
-            if let Some(r) = await_result(&mut socket, rid) {
+            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts) {
                 sample.heap_used = r["usedSize"].as_i64();
                 sample.heap_total = r["totalSize"].as_i64();
             }
@@ -241,7 +245,7 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
             Ok(tungstenite::Message::Text(t)) => {
                 cdp_trace("<<", &t);
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused);
+                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused, &mut scripts);
                 }
             }
             Ok(tungstenite::Message::Close(_)) => break,
@@ -260,6 +264,55 @@ fn debug_cmd(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsSt
     let _ = socket.send(tungstenite::Message::Text(json!({"id": *seq, "method": method}).to_string()));
 }
 
+/// Learn scriptId → URL from a CDP stackTrace (console/exception frames carry
+/// both, unlike Debugger.paused frames which only have a scriptId).
+fn learn_scripts(scripts: &mut HashMap<String, String>, st: &Value) {
+    if let Some(frames) = st.get("callFrames").and_then(|f| f.as_array()) {
+        for f in frames {
+            if let (Some(sid), Some(url)) = (f["scriptId"].as_str(), f["url"].as_str()) {
+                if !url.is_empty() {
+                    scripts.entry(sid.to_string()).or_insert_with(|| url.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Like `await_result`, but routes every non-matching frame through
+/// `handle_message` instead of dropping it — so async notifications
+/// (Debugger.paused/resumed, console, network) that arrive while we're waiting
+/// for a request's reply are still processed. Used for the perf sampler, which
+/// otherwise silently ate the `Debugger.paused` that follows a step.
+#[allow(clippy::too_many_arguments)]
+fn request_response(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    id: i64,
+    key: &str,
+    tx: &Sender<RnEvent>,
+    records: &mut HashMap<String, NetRecord>,
+    seq: &mut i64,
+    port: u16,
+    paused: &mut bool,
+    scripts: &mut HashMap<String, String>,
+) -> Option<Value> {
+    for _ in 0..50 {
+        match socket.read() {
+            Ok(tungstenite::Message::Text(t)) => {
+                cdp_trace("<<", &t);
+                if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                    if v.get("id").and_then(|i| i.as_i64()) == Some(id) {
+                        return v.get("result").cloned();
+                    }
+                    handle_message(key, &v, tx, records, socket, seq, port, paused, scripts);
+                }
+            }
+            Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
 fn handle_message(
     key: &str,
     msg: &Value,
@@ -269,6 +322,7 @@ fn handle_message(
     seq: &mut i64,
     port: u16,
     paused: &mut bool,
+    scripts: &mut HashMap<String, String>,
 ) {
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     match method {
@@ -276,15 +330,24 @@ fn handle_message(
             *paused = true;
             let frames = msg["params"]["callFrames"].as_array().cloned().unwrap_or_default();
             let reason = msg["params"]["reason"].as_str().unwrap_or("breakpoint").to_string();
-            let (file, line) = paused_location(port, &frames);
+            let (file, line) = paused_location(port, &frames, scripts);
             let _ = tx.send(RnEvent::Paused(key.into(), PausedInfo { file, line, reason }));
         }
         "Debugger.resumed" => {
             *paused = false;
             let _ = tx.send(RnEvent::Resumed(key.into()));
         }
+        "Debugger.scriptParsed" => {
+            let p = &msg["params"];
+            if let (Some(sid), Some(url)) = (p["scriptId"].as_str(), p["url"].as_str()) {
+                if !url.is_empty() {
+                    scripts.entry(sid.to_string()).or_insert_with(|| url.to_string());
+                }
+            }
+        }
         "Runtime.consoleAPICalled" => {
             let p = &msg["params"];
+            learn_scripts(scripts, &p["stackTrace"]);
             let level = p["type"].as_str().unwrap_or("log").to_string();
             let args = p["args"].as_array().cloned().unwrap_or_default();
             let text = args.iter().map(render_arg).collect::<Vec<_>>().join(" ");
@@ -312,6 +375,7 @@ fn handle_message(
         }
         "Runtime.exceptionThrown" => {
             let d = &msg["params"]["exceptionDetails"];
+            learn_scripts(scripts, &d["stackTrace"]);
             let text = d["exception"]["description"].as_str().or_else(|| d["text"].as_str()).unwrap_or("Uncaught exception").to_string();
             let stack = stack_frames(&d["stackTrace"], port);
             let _ = tx.send(RnEvent::Log(key.into(), LogEntry { kind: "console".into(), level: "error".into(), text, expanded: None, stack }));
@@ -503,12 +567,23 @@ fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
 /// CDP Debugger frames carry line/col under `location`; the script URL is
 /// top-level. Falls back to the raw bundle basename + line when symbolication
 /// isn't available.
-fn paused_location(port: u16, frames: &[Value]) -> (String, i64) {
+fn paused_location(port: u16, frames: &[Value], scripts: &HashMap<String, String>) -> (String, i64) {
+    // The script URL for a frame: Debugger frames only give a scriptId, so look
+    // it up in the learned map (fall back to any url the frame does carry).
+    let frame_url = |f: &Value| -> String {
+        let sid = f["location"]["scriptId"].as_str().unwrap_or("");
+        scripts
+            .get(sid)
+            .map(|s| s.as_str())
+            .or_else(|| f["url"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     let req: Vec<Value> = frames
         .iter()
         .map(|f| {
             json!({
-                "file": f["url"].as_str().unwrap_or(""),
+                "file": frame_url(f),
                 "lineNumber": f["location"]["lineNumber"].as_i64().unwrap_or(0) + 1,
                 "column": f["location"]["columnNumber"].as_i64().unwrap_or(0),
                 "methodName": f["functionName"].as_str().unwrap_or(""),
@@ -525,8 +600,8 @@ fn paused_location(port: u16, frames: &[Value]) -> (String, i64) {
     }
     // Fallback: the top frame's raw bundle position.
     let top = frames.first();
-    let url = top.and_then(|f| f["url"].as_str()).unwrap_or("");
-    let file = url.rsplit('/').next().unwrap_or(url).to_string();
+    let url = top.map(frame_url).unwrap_or_default();
+    let file = url.rsplit('/').next().unwrap_or(&url).to_string();
     let line = top.and_then(|f| f["location"]["lineNumber"].as_i64()).unwrap_or(0) + 1;
     (file, line)
 }
