@@ -67,6 +67,11 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                     "supportsConfigurationDoneRequest": true,
                     "supportsTerminateRequest": true,
                     "supportsConditionalBreakpoints": true,
+                    "supportsEvaluateForHovers": true,
+                    "exceptionBreakpointFilters": [
+                        { "filter": "all", "label": "All Exceptions" },
+                        { "filter": "uncaught", "label": "Uncaught Exceptions", "default": true },
+                    ],
                 }));
                 event(&writer, &seq, "initialized", json!({}));
             }
@@ -149,7 +154,47 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                 }
                 respond(&writer, &seq, req_seq, &command, json!({ "breakpoints": out }));
             }
-            "setExceptionBreakpoints" => respond(&writer, &seq, req_seq, &command, json!({})),
+            "setExceptionBreakpoints" => {
+                let filters = msg["arguments"]["filters"].as_array().cloned().unwrap_or_default();
+                let has = |f: &str| filters.iter().any(|x| x.as_str() == Some(f));
+                let state = if has("all") {
+                    "all"
+                } else if has("uncaught") {
+                    "uncaught"
+                } else {
+                    "none"
+                };
+                debug_request(&senders, "Debugger.setPauseOnExceptions", json!({ "state": state }));
+                respond(&writer, &seq, req_seq, &command, json!({}));
+            }
+            "evaluate" => {
+                let expr = msg["arguments"]["expression"].as_str().unwrap_or("").to_string();
+                // Evaluate in the selected frame when paused, else globally.
+                let call_frame_id = msg["arguments"]["frameId"]
+                    .as_i64()
+                    .and_then(|i| raw.lock().unwrap().get(i as usize).and_then(|f| f["callFrameId"].as_str().map(String::from)));
+                let res = if let Some(cfid) = call_frame_id {
+                    debug_request(&senders, "Debugger.evaluateOnCallFrame", json!({
+                        "callFrameId": cfid, "expression": expr,
+                        "includeCommandLineAPI": true, "generatePreview": true, "silent": true,
+                    }))
+                } else {
+                    debug_request(&senders, "Runtime.evaluate", json!({
+                        "expression": expr,
+                        "includeCommandLineAPI": true, "generatePreview": true, "silent": true,
+                    }))
+                };
+                if res["exceptionDetails"].is_object() {
+                    let m = res["exceptionDetails"]["exception"]["description"]
+                        .as_str()
+                        .or_else(|| res["exceptionDetails"]["text"].as_str())
+                        .unwrap_or("evaluation error");
+                    respond_fail(&writer, &seq, req_seq, &command, m);
+                } else {
+                    let (display, child) = describe_value(&res["result"], &var_refs, &next_ref);
+                    respond(&writer, &seq, req_seq, &command, json!({ "result": display, "variablesReference": child }));
+                }
+            }
             "threads" => {
                 respond(&writer, &seq, req_seq, &command, json!({"threads": [{"id": 1, "name": "Hermes"}]}));
             }
@@ -461,6 +506,16 @@ fn respond(writer: &Writer, seq: &Seq, req_seq: i64, command: &str, body: Value)
         "success": true,
         "command": command,
         "body": body,
+    }));
+}
+
+fn respond_fail(writer: &Writer, seq: &Seq, req_seq: i64, command: &str, message: &str) {
+    write_msg(writer, seq, json!({
+        "type": "response",
+        "request_seq": req_seq,
+        "success": false,
+        "command": command,
+        "message": message,
     }));
 }
 
