@@ -3,7 +3,7 @@
 //! itself into an arbitrary `Rect` (the full screen for `logs --rn`, a pane in
 //! `metroctl`). Extracted from the old `rntui` so both share one implementation.
 
-use crate::rnclient::{format_js, ConnCmd, LogEntry, NetRecord, RnClient, RnEvent, Status, TargetInfo};
+use crate::rnclient::{format_js, ConnCmd, LogEntry, NetRecord, PausedInfo, RnClient, RnEvent, Status, TargetInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
@@ -230,11 +230,13 @@ struct Device {
     network_supported: bool,
     was_disconnected: bool,
     perf: PerfState,
+    /// `Some` while the JS VM is suspended at a breakpoint/step on this device.
+    paused: Option<PausedInfo>,
 }
 
 impl Default for Device {
     fn default() -> Self {
-        Device { logs: Vec::new(), net: Vec::new(), status: Status::Connecting, network_supported: true, was_disconnected: false, perf: PerfState::default() }
+        Device { logs: Vec::new(), net: Vec::new(), status: Status::Connecting, network_supported: true, was_disconnected: false, perf: PerfState::default(), paused: None }
     }
 }
 
@@ -339,6 +341,14 @@ impl RnView {
         self.active.clone()
     }
 
+    /// A one-line paused banner for the active device when its VM is suspended,
+    /// so the embedding dashboard can surface it in its own status bar.
+    pub fn active_paused(&self) -> Option<String> {
+        let d = self.devices.get(self.active.as_ref()?)?;
+        let p = d.paused.as_ref()?;
+        Some(format!("⏸ PAUSED {}:{} ({})", p.file, p.line, p.reason))
+    }
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         render_view(self, frame, area);
     }
@@ -377,6 +387,7 @@ impl RnView {
                 let d = self.dev(&key);
                 if s == Status::Disconnected {
                     d.was_disconnected = true;
+                    d.paused = None; // a gone VM can't still be suspended
                 }
                 if s == Status::Connected {
                     if d.was_disconnected && clear {
@@ -408,6 +419,12 @@ impl RnView {
             }
             RnEvent::Network(key, ok) => {
                 self.dev(&key).network_supported = ok;
+            }
+            RnEvent::Paused(key, info) => {
+                self.dev(&key).paused = Some(info);
+            }
+            RnEvent::Resumed(key) => {
+                self.dev(&key).paused = None;
             }
             RnEvent::ContextCleared(key) => {
                 let clear = self.clear_on_restart;
@@ -651,14 +668,25 @@ fn render_view(view: &mut RnView, frame: &mut Frame, area: Rect) {
     // App/device engine metadata for the active target (e.g. "Hermes").
     let meta = view.targets.iter().find(|t| Some(&t.key) == view.active.as_ref()).and_then(|t| t.meta.clone());
     let meta_str = meta.map(|m| format!(" · {m}")).unwrap_or_default();
-    let head = format!(" {who} · {status}{meta_str}{filter_str}{net_filters} · {restart}   {tabbar}");
+    // While paused at a breakpoint the top bar becomes the debugger banner;
+    // otherwise it's the normal status/tab line.
+    let paused = d.and_then(|d| d.paused.as_ref());
+    let head = match paused {
+        Some(p) => format!(" ⏸ PAUSED {}:{} — F5 continue · F10 over · F11 into · ⇧F11 out · F6 pause", p.file, p.line),
+        None => format!(" {who} · {status}{meta_str}{filter_str}{net_filters} · {restart}   {tabbar}"),
+    };
+    let head_style = if paused.is_some() {
+        Style::default().bg(Color::Rgb(191, 97, 106)).fg(Color::White).add_modifier(Modifier::BOLD)
+    } else {
+        bar_style()
+    };
 
     // Blank the key footer when another pane has focus (embedded in the dashboard).
     let foot = if view.focused { footer(view, is_logs) } else { String::new() };
     let foot_style = if view.focused { bar_style() } else { Style::default() };
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::styled(pad(&head, cols), bar_style()));
+    lines.push(Line::styled(pad(&head, cols), head_style));
     if has_bar {
         let db = format!(" Devices: {}", view.targets.iter().enumerate().map(|(i, t)| if Some(&t.key) == view.active.as_ref() { format!("[{}:{}]", i + 1, t.label) } else { format!(" {}:{} ", i + 1, t.label) }).collect::<Vec<_>>().join(" "));
         lines.push(Line::styled(pad(&db, cols), bar_style()));
@@ -953,6 +981,16 @@ fn copy_curl(view: &mut RnView) {
     }
 }
 
+/// Send a debugger command to the active device, but only while it's suspended
+/// (so continue/step keys are inert when nothing is paused).
+fn send_if_paused(view: &RnView, client: &RnClient, key: &Option<String>, cmd: ConnCmd) {
+    if let Some(k) = key {
+        if view.devices.get(k).map(|d| d.paused.is_some()).unwrap_or(false) {
+            client.send(k, cmd);
+        }
+    }
+}
+
 /// Returns true to quit.
 fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
     if view.mode != Mode::Normal {
@@ -999,6 +1037,17 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
     match key.code {
         KeyCode::Char('q') => return true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+        // Debugger stepping (only act while the VM is suspended).
+        KeyCode::F(5) => send_if_paused(view, client, &key_active, ConnCmd::Continue),
+        KeyCode::F(10) => send_if_paused(view, client, &key_active, ConnCmd::StepOver),
+        KeyCode::F(11) if key.modifiers.contains(KeyModifiers::SHIFT) => send_if_paused(view, client, &key_active, ConnCmd::StepOut),
+        KeyCode::F(11) => send_if_paused(view, client, &key_active, ConnCmd::StepInto),
+        // Interrupt a running VM (works whether or not already paused).
+        KeyCode::F(6) => {
+            if let Some(k) = &key_active {
+                client.send(k, ConnCmd::Pause);
+            }
+        }
         KeyCode::Char('[') => {
             view.tab = match view.tab { Tab::Logs => Tab::Perf, Tab::Network => Tab::Logs, Tab::Perf => Tab::Network };
             view.detail = false;

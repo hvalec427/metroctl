@@ -69,12 +69,29 @@ pub enum RnEvent {
     Network(String, bool),
     ContextCleared(String),
     Perf(String, PerfSample),
+    /// The JS VM hit a breakpoint / `debugger;` / step and is now suspended.
+    Paused(String, PausedInfo),
+    /// Execution resumed (continue or step completed).
+    Resumed(String),
+}
+
+/// Where the JS VM stopped, already mapped back to an original source location.
+#[derive(Debug, Clone)]
+pub struct PausedInfo {
+    pub file: String,
+    pub line: i64,
+    pub reason: String,
 }
 
 /// Fire-and-forget commands the UI sends to a connection.
 pub enum ConnCmd {
     Reload,
     DiscardConsole,
+    Continue,
+    StepOver,
+    StepInto,
+    StepOut,
+    Pause,
 }
 
 pub struct RnClient {
@@ -150,15 +167,20 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
     send(&mut socket, "Runtime.enable");
     send(&mut socket, "Log.enable");
     send(&mut socket, "Network.enable");
+    send(&mut socket, "Debugger.enable");
     let _ = tx.send(RnEvent::Status(key.into(), Status::Connected));
     let _ = tx.send(RnEvent::Network(key.into(), true));
 
     let mut records: HashMap<String, NetRecord> = HashMap::new();
     let mut last_perf = std::time::Instant::now() - Duration::from_secs(2);
+    // While suspended at a breakpoint we must not poke the VM with the perf
+    // sampler's `Runtime.evaluate` — it either queues behind the pause or
+    // disturbs it. Set on `Debugger.paused`, cleared on `Debugger.resumed`.
+    let mut paused = false;
     const FPS_EXPR: &str = "(function(){var s=globalThis.__simonFps;if(!s){s=globalThis.__simonFps={v:0,c:0,t:Date.now()};var loop=function(){s.c++;var n=Date.now();if(n-s.t>=1000){s.v=Math.round(s.c*1000/(n-s.t));s.c=0;s.t=n;}(globalThis.requestAnimationFrame||function(f){return setTimeout(f,16);})(loop);};loop();}return s.v;})()";
 
     loop {
-        if last_perf.elapsed() >= Duration::from_secs(1) {
+        if !paused && last_perf.elapsed() >= Duration::from_secs(1) {
             last_perf = std::time::Instant::now();
             let mut sample = PerfSample::default();
             seq += 1;
@@ -188,12 +210,17 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
                     let _ = socket.send(tungstenite::Message::Text(json!({"id": 3, "method": "Runtime.discardConsoleEntries"}).to_string()));
                     let _ = socket.send(tungstenite::Message::Text(json!({"id": 4, "method": "Log.clear"}).to_string()));
                 }
+                ConnCmd::Continue => debug_cmd(&mut socket, &mut seq, "Debugger.resume"),
+                ConnCmd::StepOver => debug_cmd(&mut socket, &mut seq, "Debugger.stepOver"),
+                ConnCmd::StepInto => debug_cmd(&mut socket, &mut seq, "Debugger.stepInto"),
+                ConnCmd::StepOut => debug_cmd(&mut socket, &mut seq, "Debugger.stepOut"),
+                ConnCmd::Pause => debug_cmd(&mut socket, &mut seq, "Debugger.pause"),
             }
         }
         match socket.read() {
             Ok(tungstenite::Message::Text(t)) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port);
+                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused);
                 }
             }
             Ok(tungstenite::Message::Close(_)) => break,
@@ -205,6 +232,12 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
     let _ = tx.send(RnEvent::Status(key.into(), Status::Disconnected));
 }
 
+/// Send a parameterless Debugger command, allocating a fresh request id.
+fn debug_cmd(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, seq: &mut i64, method: &str) {
+    *seq += 1;
+    let _ = socket.send(tungstenite::Message::Text(json!({"id": *seq, "method": method}).to_string()));
+}
+
 fn handle_message(
     key: &str,
     msg: &Value,
@@ -213,9 +246,21 @@ fn handle_message(
     socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
     seq: &mut i64,
     port: u16,
+    paused: &mut bool,
 ) {
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     match method {
+        "Debugger.paused" => {
+            *paused = true;
+            let frames = msg["params"]["callFrames"].as_array().cloned().unwrap_or_default();
+            let reason = msg["params"]["reason"].as_str().unwrap_or("breakpoint").to_string();
+            let (file, line) = paused_location(port, &frames);
+            let _ = tx.send(RnEvent::Paused(key.into(), PausedInfo { file, line, reason }));
+        }
+        "Debugger.resumed" => {
+            *paused = false;
+            let _ = tx.send(RnEvent::Resumed(key.into()));
+        }
         "Runtime.consoleAPICalled" => {
             let p = &msg["params"];
             let level = p["type"].as_str().unwrap_or("log").to_string();
@@ -390,8 +435,18 @@ fn stack_frames(st: &Value, port: u16) -> Option<Vec<String>> {
     )
 }
 
-/// POST the CDP frames to Metro's symbolicate endpoint and format the mapped,
-/// non-collapsed frames. CDP line/column are 0-based; Metro wants a 1-based line.
+/// POST a prebuilt symbolicate `stack` to Metro's `/symbolicate` and return the
+/// mapped frames (each with `methodName`/`file`/`lineNumber`/`collapse`).
+fn post_symbolicate(port: u16, stack: Vec<Value>) -> Option<Vec<Value>> {
+    let url = format!("http://localhost:{port}/symbolicate");
+    let resp = reqwest::blocking::Client::new().post(&url).json(&json!({ "stack": stack })).send().ok()?;
+    let body: Value = resp.json().ok()?;
+    body.get("stack")?.as_array().cloned()
+}
+
+/// Symbolicate a Runtime stackTrace (line/col top-level) into readable frame
+/// lines, dropping collapsed framework frames. CDP positions are 0-based; Metro
+/// wants a 1-based line.
 fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
     let req: Vec<Value> = frames
         .iter()
@@ -404,10 +459,7 @@ fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
             })
         })
         .collect();
-    let url = format!("http://localhost:{port}/symbolicate");
-    let resp = reqwest::blocking::Client::new().post(&url).json(&json!({ "stack": req })).send().ok()?;
-    let body: Value = resp.json().ok()?;
-    let mapped = body.get("stack")?.as_array()?;
+    let mapped = post_symbolicate(port, req)?;
     let out: Vec<String> = mapped
         .iter()
         .filter(|f| f.get("collapse").and_then(|c| c.as_bool()) != Some(true)) // drop framework frames
@@ -423,6 +475,38 @@ fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
     } else {
         Some(out)
     }
+}
+
+/// Map a `Debugger.paused` callFrame list to the top original `(file, line)`.
+/// CDP Debugger frames carry line/col under `location`; the script URL is
+/// top-level. Falls back to the raw bundle basename + line when symbolication
+/// isn't available.
+fn paused_location(port: u16, frames: &[Value]) -> (String, i64) {
+    let req: Vec<Value> = frames
+        .iter()
+        .map(|f| {
+            json!({
+                "file": f["url"].as_str().unwrap_or(""),
+                "lineNumber": f["location"]["lineNumber"].as_i64().unwrap_or(0) + 1,
+                "column": f["location"]["columnNumber"].as_i64().unwrap_or(0),
+                "methodName": f["functionName"].as_str().unwrap_or(""),
+            })
+        })
+        .collect();
+    if let Some(mapped) = post_symbolicate(port, req) {
+        if let Some(f) = mapped.iter().find(|f| f.get("collapse").and_then(|c| c.as_bool()) != Some(true)) {
+            let file = f["file"].as_str().unwrap_or("").to_string();
+            if !file.is_empty() {
+                return (file, f["lineNumber"].as_i64().unwrap_or(0));
+            }
+        }
+    }
+    // Fallback: the top frame's raw bundle position.
+    let top = frames.first();
+    let url = top.and_then(|f| f["url"].as_str()).unwrap_or("");
+    let file = url.rsplit('/').next().unwrap_or(url).to_string();
+    let line = top.and_then(|f| f["location"]["lineNumber"].as_i64()).unwrap_or(0) + 1;
+    (file, line)
 }
 
 /// Read frames until the response with `id` arrives (bounded), returning its `result`.

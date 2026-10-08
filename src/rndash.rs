@@ -960,9 +960,17 @@ fn render_logs(app: &mut DashApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_status(app: &DashApp, frame: &mut Frame, area: Rect) {
-    let style = Style::default().bg(Color::Rgb(59, 66, 82)).fg(Color::White);
+    // A suspended VM takes over the status bar (red) so it's unmissable.
+    let paused = app.rnview.active_paused();
+    let style = if paused.is_some() {
+        Style::default().bg(Color::Rgb(191, 97, 106)).fg(Color::White).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(Color::Rgb(59, 66, 82)).fg(Color::White)
+    };
     // Global keys only — each pane shows its own keys in its footer.
-    let text: String = if let Some((f, _)) = &app.flash {
+    let text: String = if let Some(p) = &paused {
+        format!(" {p} — focus the Logs pane, then F5 continue · F10 over · F11 into")
+    } else if let Some((f, _)) = &app.flash {
         format!(" {f}")
     } else if app.input_mode {
         " INPUT — keys go to the process · Esc to exit".into()
