@@ -193,7 +193,7 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
         match socket.read() {
             Ok(tungstenite::Message::Text(t)) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq);
+                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port);
                 }
             }
             Ok(tungstenite::Message::Close(_)) => break,
@@ -212,6 +212,7 @@ fn handle_message(
     records: &mut HashMap<String, NetRecord>,
     socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
     seq: &mut i64,
+    port: u16,
 ) {
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     match method {
@@ -232,20 +233,20 @@ fn handle_message(
                     }
                 }
             }
-            let stack = stack_frames(&p["stackTrace"]);
+            let stack = stack_frames(&p["stackTrace"], port);
             let _ = tx.send(RnEvent::Log(key.into(), LogEntry { kind: "console".into(), level, text, expanded, stack }));
         }
         "Log.entryAdded" => {
             let e = &msg["params"]["entry"];
             let _ = tx.send(RnEvent::Log(
                 key.into(),
-                LogEntry { kind: "console".into(), level: e["level"].as_str().unwrap_or("log").into(), text: e["text"].as_str().unwrap_or("").into(), expanded: None, stack: stack_frames(&e["stackTrace"]) },
+                LogEntry { kind: "console".into(), level: e["level"].as_str().unwrap_or("log").into(), text: e["text"].as_str().unwrap_or("").into(), expanded: None, stack: stack_frames(&e["stackTrace"], port) },
             ));
         }
         "Runtime.exceptionThrown" => {
             let d = &msg["params"]["exceptionDetails"];
             let text = d["exception"]["description"].as_str().or_else(|| d["text"].as_str()).unwrap_or("Uncaught exception").to_string();
-            let stack = stack_frames(&d["stackTrace"]);
+            let stack = stack_frames(&d["stackTrace"], port);
             let _ = tx.send(RnEvent::Log(key.into(), LogEntry { kind: "console".into(), level: "error".into(), text, expanded: None, stack }));
         }
         "Runtime.executionContextsCleared" => {
@@ -347,22 +348,81 @@ fn handle_network(
 }
 
 /// Flatten a CDP stackTrace into `function (url:line)` strings.
-fn stack_frames(st: &Value) -> Option<Vec<String>> {
+/// Keep only the last few path segments so frames read like `src/utils/log.ts`.
+fn shorten_path(p: &str) -> String {
+    let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() > 3 {
+        parts[parts.len() - 3..].join("/")
+    } else {
+        p.to_string()
+    }
+}
+
+fn frame_line(name: &str, file: &str, line: i64) -> String {
+    let name = if name.is_empty() { "<anonymous>" } else { name };
+    format!("  at {name} ({}:{line})", shorten_path(file))
+}
+
+/// Turn a CDP stackTrace into readable lines. Tries Metro's `/symbolicate` to map
+/// bundle positions back to source files (dropping collapsed framework frames);
+/// falls back to the raw bundle positions if symbolication isn't available.
+fn stack_frames(st: &Value, port: u16) -> Option<Vec<String>> {
     let frames = st.get("callFrames")?.as_array()?;
     if frames.is_empty() {
         return None;
     }
-    let out: Vec<String> = frames
+    if let Some(sym) = symbolicate(port, frames) {
+        if !sym.is_empty() {
+            return Some(sym);
+        }
+    }
+    // Fallback: raw bundle positions.
+    Some(
+        frames
+            .iter()
+            .map(|f| {
+                let name = f["functionName"].as_str().unwrap_or("");
+                let url = f["url"].as_str().unwrap_or("");
+                let line = f["lineNumber"].as_i64().map(|l| l + 1).unwrap_or(0);
+                frame_line(name, url.rsplit('/').next().unwrap_or(url), line)
+            })
+            .collect(),
+    )
+}
+
+/// POST the CDP frames to Metro's symbolicate endpoint and format the mapped,
+/// non-collapsed frames. CDP line/column are 0-based; Metro wants a 1-based line.
+fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
+    let req: Vec<Value> = frames
         .iter()
         .map(|f| {
-            let name = f["functionName"].as_str().filter(|s| !s.is_empty()).unwrap_or("<anonymous>");
-            let url = f["url"].as_str().unwrap_or("");
-            let line = f["lineNumber"].as_i64().map(|l| l + 1).unwrap_or(0);
-            let loc = url.rsplit('/').next().unwrap_or(url);
-            format!("  at {name} ({loc}:{line})")
+            json!({
+                "file": f["url"].as_str().unwrap_or(""),
+                "lineNumber": f["lineNumber"].as_i64().unwrap_or(0) + 1,
+                "column": f["columnNumber"].as_i64().unwrap_or(0),
+                "methodName": f["functionName"].as_str().unwrap_or(""),
+            })
         })
         .collect();
-    Some(out)
+    let url = format!("http://localhost:{port}/symbolicate");
+    let resp = reqwest::blocking::Client::new().post(&url).json(&json!({ "stack": req })).send().ok()?;
+    let body: Value = resp.json().ok()?;
+    let mapped = body.get("stack")?.as_array()?;
+    let out: Vec<String> = mapped
+        .iter()
+        .filter(|f| f.get("collapse").and_then(|c| c.as_bool()) != Some(true)) // drop framework frames
+        .map(|f| {
+            let name = f["methodName"].as_str().unwrap_or("");
+            let file = f["file"].as_str().unwrap_or("");
+            let line = f["lineNumber"].as_i64().unwrap_or(0);
+            frame_line(name, file, line)
+        })
+        .collect();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// Read frames until the response with `id` arrives (bounded), returning its `result`.
