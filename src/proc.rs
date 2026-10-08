@@ -21,6 +21,7 @@ pub struct PtyProcess {
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     parser: Arc<Mutex<vt100::Parser>>,
     alive: Arc<AtomicBool>,
+    exit: Arc<Mutex<Option<u32>>>,
     rows: u16,
     cols: u16,
 }
@@ -78,9 +79,25 @@ impl PtyProcess {
             child: Arc::new(Mutex::new(child)),
             parser,
             alive,
+            exit: Arc::new(Mutex::new(None)),
             rows,
             cols,
         })
+    }
+
+    /// Exit code of a finished process (`None` while still running). Reaped
+    /// lazily and cached, so callers can poll it each render without flicker.
+    pub fn exit_code(&self) -> Option<u32> {
+        if let Some(code) = *self.exit.lock().unwrap() {
+            return Some(code);
+        }
+        let mut child = self.child.lock().ok()?;
+        if let Ok(Some(status)) = child.try_wait() {
+            let code = status.exit_code();
+            *self.exit.lock().unwrap() = Some(code);
+            return Some(code);
+        }
+        None
     }
 
     /// Forward raw input bytes (keystrokes) to the child.

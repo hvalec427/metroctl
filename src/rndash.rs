@@ -896,11 +896,19 @@ fn render_processes(app: &mut DashApp, frame: &mut Frame, area: Rect) {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let dead = if p.is_alive() { "" } else { " (exited)" };
-                if i == app.proc_sel {
-                    format!("[{}{}]", p.label, dead)
+                let mark = if p.is_alive() {
+                    String::new()
                 } else {
-                    format!(" {}{} ", p.label, dead)
+                    match p.exit_code() {
+                        Some(0) => " ✓".into(),
+                        Some(c) => format!(" ✗{c}"),
+                        None => " (exited)".into(),
+                    }
+                };
+                if i == app.proc_sel {
+                    format!("[{}{}]", p.label, mark)
+                } else {
+                    format!(" {}{} ", p.label, mark)
                 }
             })
             .collect::<Vec<_>>()
@@ -918,14 +926,12 @@ fn render_processes(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     app.proc_area = Some(content);
 
     match app.procs.get(app.proc_sel) {
-        Some(p) if p.is_alive() => {
+        // Keep showing the output whether the process is running or finished —
+        // the tab label carries the ✓ / ✗exit status. This way a clean/install
+        // that failed still shows WHY on screen.
+        Some(p) => {
             let lines = pty_lines(&p.parser(), content.width, content.height);
             frame.render_widget(Paragraph::new(Text::from(lines)), content);
-        }
-        Some(p) => {
-            // Stopped — blank the stale terminal and say so.
-            let msg = Paragraph::new(format!("· {} stopped ·", p.label)).style(Style::default().fg(Color::DarkGray));
-            frame.render_widget(msg, content);
         }
         None => {
             let msg = Paragraph::new("Press  m  to start Metro.").style(Style::default().fg(Color::DarkGray));
@@ -983,7 +989,7 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), content);
     if let Some(h) = hint {
-        render_hint(frame, h, " ↑↓ sel · ⏎ run · b start · s stop · o open · l links", focused);
+        render_hint(frame, h, " ↑↓ sel · ⏎ build · b start · s stop · o open · l links", focused);
     }
 }
 
