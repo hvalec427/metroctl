@@ -281,6 +281,40 @@ impl DashApp {
         }
     }
 
+    /// Deep clean the project (caches, node_modules, Pods, build dirs — and
+    /// reinstall), via `clean_command` (react-native-clean-project by default).
+    fn deep_clean(&mut self) {
+        let cmd = self.project.clean_command();
+        if let Some(i) = self.spawn_proc("Clean", &cmd) {
+            self.proc_sel = i;
+            self.set_flash("deep clean");
+        }
+    }
+
+    /// Reinstall JS deps + CocoaPods, no clean.
+    fn reinstall(&mut self) {
+        let cmd = self.project.install_command();
+        if let Some(i) = self.spawn_proc("Install", &cmd) {
+            self.proc_sel = i;
+            self.set_flash("reinstalling deps");
+        }
+    }
+
+    /// Combined reset: deep clean (which reinstalls) → start Metro, chained in
+    /// one pane. Stops the tracked Metro first so the new one can bind the port.
+    fn reset_project(&mut self) {
+        if let Some(i) = self.metro_idx.take() {
+            if let Some(old) = self.procs.get_mut(i) {
+                old.kill();
+            }
+        }
+        let cmd = format!("{} && {}", self.project.clean_command(), self.project.metro_command());
+        if let Some(i) = self.spawn_proc("Reset", &cmd) {
+            self.proc_sel = i;
+            self.set_flash("reset: deep clean (reinstalls) → Metro");
+        }
+    }
+
     fn run_platform(&mut self, android: bool, device_flag: Option<String>) {
         let (label, mut cmd) = if android {
             ("Android", self.project.android_command())
@@ -665,6 +699,9 @@ impl DashApp {
             }
             KeyCode::Char('x') => self.stop_selected_proc(),
             KeyCode::Char('m') => self.start_metro(),
+            KeyCode::Char('c') => self.deep_clean(),
+            KeyCode::Char('i') => self.reinstall(),
+            KeyCode::Char('a') => self.reset_project(),
             _ => {}
         }
     }
@@ -896,7 +933,7 @@ fn render_processes(app: &mut DashApp, frame: &mut Frame, area: Rect) {
         }
     }
     if let Some(h) = hint {
-        render_hint(frame, h, " [ ] tab · ⏎ type · x stop · m metro", focused);
+        render_hint(frame, h, " [ ] tab · ⏎ type · x stop · m metro · c clean · i install · a reset", focused);
     }
 }
 

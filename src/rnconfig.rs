@@ -48,6 +48,15 @@ impl PackageManager {
             Self::Pnpm => format!("pnpm {script}"),
         }
     }
+
+    /// Install dependencies with this package manager.
+    pub fn install_command(&self) -> &'static str {
+        match self {
+            Self::Npm => "npm install",
+            Self::Yarn => "yarn install",
+            Self::Pnpm => "pnpm install",
+        }
+    }
 }
 
 /// Guess the package manager for a project from its lockfile, defaulting to npm.
@@ -121,12 +130,28 @@ pub struct ProjectConfig {
     /// Deep links to pick from with `l` in the Devices pane.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deeplinks: Vec<DeepLink>,
+    /// Override for the deep-clean command (`c` in the Processes pane).
+    #[serde(rename = "cleanCommand", default, skip_serializing_if = "Option::is_none")]
+    pub clean_command: Option<String>,
+    /// Override for the reinstall command (`i` in the Processes pane).
+    #[serde(rename = "installCommand", default, skip_serializing_if = "Option::is_none")]
+    pub install_command: Option<String>,
 }
 
 impl ProjectConfig {
     /// A minimal entry pointing at a root, everything else derived from defaults.
     pub fn new(name: String, root: String) -> Self {
-        ProjectConfig { name, root, package_manager: None, metro: None, ios: None, android: None, deeplinks: Vec::new() }
+        ProjectConfig {
+            name,
+            root,
+            package_manager: None,
+            metro: None,
+            ios: None,
+            android: None,
+            deeplinks: Vec::new(),
+            clean_command: None,
+            install_command: None,
+        }
     }
 
     pub fn ios_bundle_id(&self) -> Option<&str> {
@@ -170,6 +195,25 @@ impl ProjectConfig {
             .and_then(|c| c.command.clone())
             .filter(|c| !c.trim().is_empty())
             .unwrap_or_else(|| self.package_manager().run_command("android"))
+    }
+
+    /// Deep clean: purge caches, node_modules, Pods and build dirs (and
+    /// reinstall), via react-native-clean-project. Override with `cleanCommand`.
+    pub fn clean_command(&self) -> String {
+        self.clean_command
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or_else(|| {
+                "npx react-native-clean-project --remove-iOS-build --remove-iOS-pods --clean-android-project --remove-android-build".to_string()
+            })
+    }
+
+    /// Reinstall JS deps + CocoaPods. Override with `installCommand`.
+    pub fn install_command(&self) -> String {
+        self.install_command
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or_else(|| format!("{} && npx pod-install", self.package_manager().install_command()))
     }
 
     /// Env for every command metroctl spawns: the Metro port exported as
