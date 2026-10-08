@@ -5,7 +5,7 @@ on:
     tags:
       - "v*" # stable release at that version
     branches:
-      - main # rolling "dev" build on every commit
+      - develop # rolling "dev" build on every commit
   schedule:
     - cron: "0 23 * * *" # nightly prerelease from develop
   workflow_dispatch: {} # manual nightly on demand
@@ -52,9 +52,9 @@ jobs:
             --notes "metroctl $VERSION" \
             metroctl-darwin-arm64 metroctl-darwin-x64
 
-      # main push → rolling "dev" prerelease.
+      # develop push → rolling "dev" prerelease.
       - name: Dev build
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/dev-release.sh

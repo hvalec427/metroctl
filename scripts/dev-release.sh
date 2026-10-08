@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a "dev" build from the current main commit and publish it to a single
+# Build a "dev" build from the current develop commit and publish it to a single
 # rolling prerelease tagged `dev` (binaries overwritten each push). Install with
 # `install.sh dev`. The version lives in the release title.
 set -euo pipefail
@@ -23,7 +23,7 @@ VERSION="${BASE}-dev.${TS}"
 echo "Building dev ${VERSION} ($(git rev-parse --short HEAD))"
 bash scripts/build-binaries.sh "${VERSION}"
 
-NOTES="Rolling dev build — the latest \`main\` commit, rebuilt on every push. Install with \`install.sh dev\`."
+NOTES="Rolling dev build — the latest \`develop\` commit, rebuilt on every push. Install with \`install.sh dev\`."
 
 if gh release view dev --repo "$REPO" >/dev/null 2>&1; then
   gh release edit dev --repo "$REPO" --title "${VERSION}" --prerelease --notes "${NOTES}"
