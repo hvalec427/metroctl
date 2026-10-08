@@ -55,6 +55,10 @@ pub enum DebugEvent {
 /// reads this to know where to fan Debugger events.
 pub type DebugSink = Arc<Mutex<Option<Sender<DebugEvent>>>>;
 
+/// Shared slot holding the app's main bundle URL (learned from loaded scripts),
+/// so the DAP server can fetch its source map to place editor breakpoints.
+pub type UrlSlot = Arc<Mutex<Option<String>>>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     Connecting,
@@ -152,13 +156,15 @@ impl RnClient {
         let (tx, rx) = std::sync::mpsc::channel();
         let cmd_senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>> = Arc::new(Mutex::new(HashMap::new()));
         let debug_sink: DebugSink = Arc::new(Mutex::new(None));
+        let bundle: UrlSlot = Arc::new(Mutex::new(None));
         let senders = cmd_senders.clone();
         let evt = tx.clone();
         let sink = debug_sink.clone();
-        std::thread::spawn(move || poll_loop(port, evt, senders, sink));
+        let bundle_poll = bundle.clone();
+        std::thread::spawn(move || poll_loop(port, evt, senders, sink, bundle_poll));
         // Expose this metroctl's single Hermes debugger to editors over DAP.
         let dap_senders = cmd_senders.clone();
-        std::thread::spawn(move || dap::serve(dap_senders, debug_sink));
+        std::thread::spawn(move || dap::serve(dap_senders, debug_sink, bundle));
         RnClient { rx, cmd_senders, port }
     }
 
@@ -173,7 +179,7 @@ impl RnClient {
     }
 }
 
-fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>, debug_sink: DebugSink) {
+fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>, debug_sink: DebugSink, bundle: UrlSlot) {
     loop {
         if let Ok(targets) = fetch_targets(port) {
             let live: Vec<_> = targets.into_iter().filter(|t| t.web_socket_debugger_url.is_some()).collect();
@@ -189,8 +195,9 @@ fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, 
                     let tx2 = tx.clone();
                     let senders2 = senders.clone();
                     let sink = debug_sink.clone();
+                    let bundle = bundle.clone();
                     std::thread::spawn(move || {
-                        conn_loop(&key, &url, port, &tx2, crx, &sink);
+                        conn_loop(&key, &url, port, &tx2, crx, &sink, &bundle);
                         senders2.lock().unwrap().remove(&key); // allow reconnection on next poll
                     });
                 }
@@ -200,7 +207,7 @@ fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, 
     }
 }
 
-fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receiver<ConnCmd>, debug_sink: &DebugSink) {
+fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receiver<ConnCmd>, debug_sink: &DebugSink, bundle: &UrlSlot) {
     let _ = tx.send(RnEvent::Status(key.into(), Status::Connecting));
     let mut socket = match connect_cdp(url, port) {
         Ok(s) => s,
@@ -294,6 +301,12 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
                 cdp_trace("<<", &t);
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
                     handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused, &mut scripts, debug_sink);
+                }
+                // Surface the app's main bundle URL for the DAP source-map fetch.
+                if bundle.lock().unwrap().is_none() {
+                    if let Some(u) = scripts.values().find(|u| u.contains(".bundle")) {
+                        *bundle.lock().unwrap() = Some(u.clone());
+                    }
                 }
             }
             Ok(tungstenite::Message::Close(_)) => break,

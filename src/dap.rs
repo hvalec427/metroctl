@@ -8,8 +8,9 @@
 //! Breakpoints set from the editor (source-map mapping) and scopes/variables
 //! come next; for now `debugger;` statements drive the stops.
 
-use super::{ConnCmd, DebugEvent, DebugSink};
+use super::{ConnCmd, DebugEvent, DebugSink, UrlSlot};
 use serde_json::{json, Value};
+use sourcemap::SourceMap;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -21,7 +22,7 @@ type Senders = Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>;
 type Writer = Arc<Mutex<TcpStream>>;
 type Seq = Arc<Mutex<i64>>;
 
-pub fn serve(senders: Senders, debug_sink: DebugSink) {
+pub fn serve(senders: Senders, debug_sink: DebugSink, bundle: UrlSlot) {
     let port: u16 = std::env::var("METROCTL_DAP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9223);
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -31,13 +32,14 @@ pub fn serve(senders: Senders, debug_sink: DebugSink) {
     for stream in listener.incoming().flatten() {
         let senders = senders.clone();
         let sink = debug_sink.clone();
+        let bundle = bundle.clone();
         std::thread::spawn(move || {
-            let _ = session(stream, senders, sink);
+            let _ = session(stream, senders, sink, bundle);
         });
     }
 }
 
-fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink) -> std::io::Result<()> {
+fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: UrlSlot) -> std::io::Result<()> {
     let writer: Writer = Arc::new(Mutex::new(stream.try_clone()?));
     let seq: Seq = Arc::new(Mutex::new(1));
     let frames: Arc<Mutex<Vec<super::DapFrame>>> = Arc::new(Mutex::new(Vec::new()));
@@ -47,6 +49,10 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink) -> std::i
     let raw: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
     let var_refs: Arc<Mutex<HashMap<i64, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let next_ref: Arc<Mutex<i64>> = Arc::new(Mutex::new(1000));
+    // Parsed source map for the current bundle (url, map), and the CDP
+    // breakpointIds we've set per source file (so we can replace them).
+    let mut smap: Option<(String, SourceMap)> = None;
+    let mut bps_by_src: HashMap<String, Vec<String>> = HashMap::new();
     let mut reader = BufReader::new(stream);
 
     let (de_tx, de_rx) = channel::<DebugEvent>();
@@ -60,6 +66,7 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink) -> std::i
                 respond(&writer, &seq, req_seq, &command, json!({
                     "supportsConfigurationDoneRequest": true,
                     "supportsTerminateRequest": true,
+                    "supportsConditionalBreakpoints": true,
                 }));
                 event(&writer, &seq, "initialized", json!({}));
             }
@@ -98,12 +105,49 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink) -> std::i
             }
             "configurationDone" => respond(&writer, &seq, req_seq, &command, json!({})),
             "setBreakpoints" => {
-                // Phase 2a: acknowledge but report unverified — editor-set
-                // breakpoints need source-map mapping (2b). `debugger;` stops
-                // work regardless.
-                let lines = msg["arguments"]["breakpoints"].as_array().cloned().unwrap_or_default();
-                let bps: Vec<Value> = lines.iter().map(|b| json!({"verified": false, "line": b["line"]})).collect();
-                respond(&writer, &seq, req_seq, &command, json!({ "breakpoints": bps }));
+                let src_path = msg["arguments"]["source"]["path"].as_str().unwrap_or("").to_string();
+                let want = msg["arguments"]["breakpoints"].as_array().cloned().unwrap_or_default();
+
+                // Clear this file's previous breakpoints before re-setting.
+                if let Some(old) = bps_by_src.remove(&src_path) {
+                    for id in old {
+                        let _ = debug_request(&senders, "Debugger.removeBreakpoint", json!({ "breakpointId": id }));
+                    }
+                }
+
+                ensure_sourcemap(&bundle, &mut smap);
+
+                let mut out = Vec::new();
+                let mut ids = Vec::new();
+                for b in &want {
+                    let line = b["line"].as_i64().unwrap_or(0);
+                    let condition = b["condition"].as_str().filter(|c| !c.is_empty());
+                    // Map original .tsx line → generated bundle position.
+                    let mapped = smap.as_ref().and_then(|(_, sm)| map_breakpoint(sm, &src_path, line));
+                    match mapped {
+                        Some((gline, gcol)) => {
+                            let mut params = json!({
+                                "urlRegex": "index\\.bundle",
+                                "lineNumber": gline,
+                                "columnNumber": gcol,
+                            });
+                            if let Some(c) = condition {
+                                params["condition"] = json!(c);
+                            }
+                            let res = debug_request(&senders, "Debugger.setBreakpointByUrl", params);
+                            let bound = res["locations"].as_array().map(|a| !a.is_empty()).unwrap_or(false);
+                            if let Some(id) = res["breakpointId"].as_str() {
+                                ids.push(id.to_string());
+                            }
+                            out.push(json!({ "verified": bound, "line": line }));
+                        }
+                        None => out.push(json!({ "verified": false, "line": line })),
+                    }
+                }
+                if !ids.is_empty() {
+                    bps_by_src.insert(src_path, ids);
+                }
+                respond(&writer, &seq, req_seq, &command, json!({ "breakpoints": out }));
             }
             "setExceptionBreakpoints" => respond(&writer, &seq, req_seq, &command, json!({})),
             "threads" => {
@@ -302,6 +346,73 @@ fn describe_value(v: &Value, refs: &Arc<Mutex<HashMap<i64, String>>>, next: &Arc
         0
     };
     (display, child)
+}
+
+/// Fetch + parse the bundle's source map (cached by bundle URL). The map lives
+/// next to the bundle at the same path with `.bundle` → `.map`.
+fn ensure_sourcemap(bundle: &UrlSlot, cache: &mut Option<(String, SourceMap)>) {
+    let url = match bundle.lock().unwrap().clone() {
+        Some(u) => u,
+        None => return,
+    };
+    if cache.as_ref().map(|(u, _)| u == &url).unwrap_or(false) {
+        return; // already have this bundle's map
+    }
+    let map_url = url.replacen(".bundle", ".map", 1);
+    if let Ok(resp) = reqwest::blocking::get(&map_url) {
+        if let Ok(bytes) = resp.bytes() {
+            if let Ok(sm) = SourceMap::from_slice(&bytes) {
+                *cache = Some((url, sm));
+            }
+        }
+    }
+}
+
+/// The source-map `sources` entry sharing the longest trailing path with `path`
+/// (requires at least the basename to match), so an editor's absolute path finds
+/// the right source regardless of how Metro spells it.
+fn best_source(sm: &SourceMap, path: &str) -> Option<String> {
+    let p: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    let mut best: Option<(usize, String)> = None;
+    for s in sm.sources() {
+        let sc: Vec<&str> = s.split('/').filter(|c| !c.is_empty()).collect();
+        let mut n = 0;
+        while n < p.len() && n < sc.len() && p[p.len() - 1 - n] == sc[sc.len() - 1 - n] {
+            n += 1;
+        }
+        if n == 0 {
+            continue; // not even the filename matches
+        }
+        if best.as_ref().map(|(bn, _)| n > *bn).unwrap_or(true) {
+            best = Some((n, s.to_string()));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
+/// Map an original (file, 1-based line) to the generated (line, col) in the
+/// bundle: the first mapping token on or after that line for the matched source.
+fn map_breakpoint(sm: &SourceMap, path: &str, dap_line: i64) -> Option<(u32, u32)> {
+    if dap_line <= 0 {
+        return None;
+    }
+    let source = best_source(sm, path)?;
+    let want = (dap_line - 1) as u32; // source maps are 0-based
+    let mut best: Option<(u32, u32, u32)> = None; // (src_line, dst_line, dst_col)
+    for tok in sm.tokens() {
+        if tok.get_source() != Some(source.as_str()) {
+            continue;
+        }
+        let sl = tok.get_src_line();
+        if sl < want {
+            continue;
+        }
+        let cand = (sl, tok.get_dst_line(), tok.get_dst_col());
+        if best.map(|b| cand < b).unwrap_or(true) {
+            best = Some(cand);
+        }
+    }
+    best.map(|(_, dl, dc)| (dl, dc))
 }
 
 // ── DAP wire protocol (Content-Length framed JSON, like LSP) ──────────────────
