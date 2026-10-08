@@ -1,4 +1,4 @@
-//! `simon rn` — the tiled React Native dashboard. One window: a Processes pane
+//! `metroctl` — the tiled React Native dashboard. One window: a Processes pane
 //! (Metro + install/run, each in a PTY), a Devices & Actions pane (launch
 //! sims/emulators, install & run, open links, app-presence), and the embedded
 //! `RnView` (JS logs / network / perf). Keys are pane-scoped — each pane owns its
@@ -799,7 +799,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 fn render_quit_popup(frame: &mut Frame, area: Rect) {
     let r = centered(area, 50, 5);
     frame.render_widget(Clear, r); // wipe whatever's underneath
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit simon rn? ");
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit metroctl? ");
     let inner = block.inner(r);
     frame.render_widget(block, r);
     let lines = vec![

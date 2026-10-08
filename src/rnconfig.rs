@@ -1,7 +1,6 @@
-//! React Native project config (`~/.config/simon/rn.json`): a registry of
+//! React Native project config (`~/.config/metroctl/config.json`): a registry of
 //! projects keyed by repo root, each describing how to run Metro and how to
-//! build/run iOS and Android. Follows the `pushconfig` / `update` pattern
-//! (`$HOME/.config/simon/*.json`, serde with camelCase names).
+//! build/run iOS and Android (serde with camelCase names).
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -173,7 +172,7 @@ impl ProjectConfig {
             .unwrap_or_else(|| self.package_manager().run_command("android"))
     }
 
-    /// Env for every command simon spawns: the Metro port exported as
+    /// Env for every command metroctl spawns: the Metro port exported as
     /// `RCT_METRO_PORT`, so the port is configured in exactly one place (`metro.port`).
     pub fn command_env(&self) -> BTreeMap<String, String> {
         let mut env = BTreeMap::new();

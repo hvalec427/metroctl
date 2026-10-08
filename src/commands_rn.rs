@@ -1,16 +1,16 @@
-//! `simon rn` — manage and run a React Native project from a single window.
+//! `metroctl` — manage and run a React Native project from a single window.
 //! No subcommand launches the dashboard TUI; `init` registers the current
 //! directory; `config` prints the config path.
 
 use crate::rnconfig::{current_project, load_rn_config, rn_config_path, save_rn_config, ProjectConfig, RnConfig};
 use inquire::Text;
 
-/// `simon rn` — launch the dashboard for the current project.
+/// `metroctl` — launch the dashboard for the current project.
 pub fn launch() {
     let cfg = match load_rn_config() {
         Ok(Some(c)) => c,
         Ok(None) => {
-            eprintln!("No projects configured yet. Run `simon rn init` in your project directory.");
+            eprintln!("No projects configured yet. Run `metroctl init` in your project directory.");
             std::process::exit(1);
         }
         Err(e) => {
@@ -22,7 +22,7 @@ pub fn launch() {
         Some(p) => p.clone(),
         None => {
             eprintln!("This directory isn't a registered React Native project.");
-            eprintln!("Run `simon rn init` here to add it.");
+            eprintln!("Run `metroctl init` here to add it.");
             std::process::exit(1);
         }
     };
@@ -32,7 +32,7 @@ pub fn launch() {
     }
 }
 
-/// `simon rn init` — register (or update) the current directory as a project.
+/// `metroctl init` — register (or update) the current directory as a project.
 pub fn init() {
     let cwd = match std::env::current_dir() {
         Ok(d) => std::fs::canonicalize(&d).unwrap_or(d),
@@ -80,10 +80,10 @@ pub fn init() {
     println!("\nEdit {} to customize commands, port, simulator/avd, or env.", rn_config_path().display());
 }
 
-/// `simon rn config` — print the config file path.
+/// `metroctl config` — print the config file path.
 pub fn print_config_path() {
     println!("{}", rn_config_path().display());
     if load_rn_config().unwrap_or(None).map(|c: RnConfig| c.projects.is_empty()).unwrap_or(true) {
-        eprintln!("(no projects configured yet — run `simon rn init`)");
+        eprintln!("(no projects configured yet — run `metroctl init`)");
     }
 }

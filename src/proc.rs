@@ -1,6 +1,6 @@
 //! A child process running in a pseudo-terminal, with its output parsed into a
 //! live terminal screen (`vt100`). Used for Metro and for `run ios`/`run android`
-//! so simon can show their colored output and forward raw keys (Metro's `r`/`d`/`j`…)
+//! so metroctl can show their colored output and forward raw keys (Metro's `r`/`d`/`j`…)
 //! exactly as a normal terminal would. Follows simon's std-thread model — a reader
 //! thread pumps PTY bytes into the parser behind a mutex.
 
