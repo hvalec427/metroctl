@@ -27,6 +27,29 @@ fn cdp_trace(tag: &str, msg: &str) {
     }
 }
 
+// The DAP server lives in its own file but as a submodule here, so it can reach
+// ConnCmd/DebugEvent without touching main.rs (which carries unrelated WIP).
+#[path = "dap.rs"]
+mod dap;
+
+/// A stack frame, already symbolicated to an original source location, handed to
+/// an attached DAP client for its stackTrace.
+#[derive(Debug, Clone)]
+pub struct DapFrame {
+    pub name: String,
+    pub file: String,
+    pub line: i64,
+    pub column: i64,
+}
+
+/// Async debugger notifications pushed to an attached DAP session (one per
+/// connected editor). Separate from `RnEvent`, which drives the TUI.
+pub enum DebugEvent {
+    Paused { frames: Vec<DapFrame>, reason: String },
+    Resumed,
+    Terminated,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     Connecting,
@@ -108,6 +131,9 @@ pub enum ConnCmd {
     StepInto,
     StepOut,
     Pause,
+    /// A DAP session attaches its event stream; the connection fans
+    /// Debugger.paused/resumed/terminated to it.
+    AttachDebugger { events: Sender<DebugEvent> },
 }
 
 pub struct RnClient {
@@ -123,6 +149,9 @@ impl RnClient {
         let senders = cmd_senders.clone();
         let evt = tx.clone();
         std::thread::spawn(move || poll_loop(port, evt, senders));
+        // Expose this metroctl's single Hermes debugger to editors over DAP.
+        let dap_senders = cmd_senders.clone();
+        std::thread::spawn(move || dap::serve(dap_senders));
         RnClient { rx, cmd_senders, port }
     }
 
@@ -201,6 +230,8 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
     // sampler's `Runtime.evaluate` — it either queues behind the pause or
     // disturbs it. Set on `Debugger.paused`, cleared on `Debugger.resumed`.
     let mut paused = false;
+    // Set when a DAP editor attaches; Debugger events are fanned here too.
+    let mut debug_events: Option<Sender<DebugEvent>> = None;
     const FPS_EXPR: &str = "(function(){var s=globalThis.__simonFps;if(!s){s=globalThis.__simonFps={v:0,c:0,t:Date.now()};var loop=function(){s.c++;var n=Date.now();if(n-s.t>=1000){s.v=Math.round(s.c*1000/(n-s.t));s.c=0;s.t=n;}(globalThis.requestAnimationFrame||function(f){return setTimeout(f,16);})(loop);};loop();}return s.v;})()";
 
     loop {
@@ -210,13 +241,13 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
             seq += 1;
             let rid = seq;
             let _ = socket.send(tungstenite::Message::Text(json!({"id": rid, "method": "Runtime.evaluate", "params": {"expression": FPS_EXPR, "returnByValue": true}}).to_string()));
-            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts) {
+            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, &debug_events) {
                 sample.fps = r["result"]["value"].as_i64();
             }
             seq += 1;
             let rid = seq;
             let _ = socket.send(tungstenite::Message::Text(json!({"id": rid, "method": "Runtime.getHeapUsage"}).to_string()));
-            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts) {
+            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, &debug_events) {
                 sample.heap_used = r["usedSize"].as_i64();
                 sample.heap_total = r["totalSize"].as_i64();
             }
@@ -239,13 +270,18 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
                 ConnCmd::StepInto => debug_cmd(&mut socket, &mut seq, "Debugger.stepInto"),
                 ConnCmd::StepOut => debug_cmd(&mut socket, &mut seq, "Debugger.stepOut"),
                 ConnCmd::Pause => debug_cmd(&mut socket, &mut seq, "Debugger.pause"),
+                ConnCmd::AttachDebugger { events } => {
+                    debug_events = Some(events);
+                    // Re-assert the Debugger domain for the freshly attached session.
+                    debug_cmd(&mut socket, &mut seq, "Debugger.enable");
+                }
             }
         }
         match socket.read() {
             Ok(tungstenite::Message::Text(t)) => {
                 cdp_trace("<<", &t);
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused, &mut scripts);
+                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused, &mut scripts, &debug_events);
                 }
             }
             Ok(tungstenite::Message::Close(_)) => break,
@@ -253,6 +289,9 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
             Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(_) => break,
         }
+    }
+    if let Some(de) = &debug_events {
+        let _ = de.send(DebugEvent::Terminated);
     }
     let _ = tx.send(RnEvent::Status(key.into(), Status::Disconnected));
 }
@@ -294,6 +333,7 @@ fn request_response(
     port: u16,
     paused: &mut bool,
     scripts: &mut HashMap<String, String>,
+    debug_events: &Option<Sender<DebugEvent>>,
 ) -> Option<Value> {
     for _ in 0..50 {
         match socket.read() {
@@ -303,7 +343,7 @@ fn request_response(
                     if v.get("id").and_then(|i| i.as_i64()) == Some(id) {
                         return v.get("result").cloned();
                     }
-                    handle_message(key, &v, tx, records, socket, seq, port, paused, scripts);
+                    handle_message(key, &v, tx, records, socket, seq, port, paused, scripts, debug_events);
                 }
             }
             Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
@@ -323,6 +363,7 @@ fn handle_message(
     port: u16,
     paused: &mut bool,
     scripts: &mut HashMap<String, String>,
+    debug_events: &Option<Sender<DebugEvent>>,
 ) {
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     match method {
@@ -330,12 +371,19 @@ fn handle_message(
             *paused = true;
             let frames = msg["params"]["callFrames"].as_array().cloned().unwrap_or_default();
             let reason = msg["params"]["reason"].as_str().unwrap_or("breakpoint").to_string();
-            let (file, line) = paused_location(port, &frames, scripts);
-            let _ = tx.send(RnEvent::Paused(key.into(), PausedInfo { file, line, reason }));
+            let dap_frames = symbolicate_frames(port, &frames, scripts);
+            let (file, line) = dap_frames.first().map(|f| (f.file.clone(), f.line)).unwrap_or_default();
+            let _ = tx.send(RnEvent::Paused(key.into(), PausedInfo { file, line, reason: reason.clone() }));
+            if let Some(de) = debug_events {
+                let _ = de.send(DebugEvent::Paused { frames: dap_frames, reason });
+            }
         }
         "Debugger.resumed" => {
             *paused = false;
             let _ = tx.send(RnEvent::Resumed(key.into()));
+            if let Some(de) = debug_events {
+                let _ = de.send(DebugEvent::Resumed);
+            }
         }
         "Debugger.scriptParsed" => {
             let p = &msg["params"];
@@ -567,9 +615,11 @@ fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
 /// CDP Debugger frames carry line/col under `location`; the script URL is
 /// top-level. Falls back to the raw bundle basename + line when symbolication
 /// isn't available.
-fn paused_location(port: u16, frames: &[Value], scripts: &HashMap<String, String>) -> (String, i64) {
-    // The script URL for a frame: Debugger frames only give a scriptId, so look
-    // it up in the learned map (fall back to any url the frame does carry).
+/// Symbolicate `Debugger.paused` callFrames into DAP stack frames (original
+/// source locations). Debugger frames carry only a scriptId, so the URL is
+/// resolved from the learned `scripts` map. Falls back to raw bundle positions
+/// per frame when the symbolicator can't map them.
+fn symbolicate_frames(port: u16, frames: &[Value], scripts: &HashMap<String, String>) -> Vec<DapFrame> {
     let frame_url = |f: &Value| -> String {
         let sid = f["location"]["scriptId"].as_str().unwrap_or("");
         scripts
@@ -579,6 +629,19 @@ fn paused_location(port: u16, frames: &[Value], scripts: &HashMap<String, String
             .unwrap_or("")
             .to_string()
     };
+    let name_of = |n: &str| if n.is_empty() { "<anonymous>".to_string() } else { n.to_string() };
+
+    // Per-frame raw fallback (bundle basename + 1-based line/col).
+    let raw: Vec<DapFrame> = frames
+        .iter()
+        .map(|f| DapFrame {
+            name: name_of(f["functionName"].as_str().unwrap_or("")),
+            file: frame_url(f),
+            line: f["location"]["lineNumber"].as_i64().unwrap_or(0) + 1,
+            column: f["location"]["columnNumber"].as_i64().unwrap_or(0) + 1,
+        })
+        .collect();
+
     let req: Vec<Value> = frames
         .iter()
         .map(|f| {
@@ -590,20 +653,29 @@ fn paused_location(port: u16, frames: &[Value], scripts: &HashMap<String, String
             })
         })
         .collect();
+
     if let Some(mapped) = post_symbolicate(port, req) {
-        if let Some(f) = mapped.iter().find(|f| f.get("collapse").and_then(|c| c.as_bool()) != Some(true)) {
-            let file = f["file"].as_str().unwrap_or("").to_string();
-            if !file.is_empty() {
-                return (file, f["lineNumber"].as_i64().unwrap_or(0));
-            }
+        let out: Vec<DapFrame> = mapped
+            .iter()
+            .filter(|f| f.get("collapse").and_then(|c| c.as_bool()) != Some(true))
+            .filter_map(|f| {
+                let file = f["file"].as_str().unwrap_or("");
+                if file.is_empty() {
+                    return None;
+                }
+                Some(DapFrame {
+                    name: name_of(f["methodName"].as_str().unwrap_or("")),
+                    file: file.to_string(),
+                    line: f["lineNumber"].as_i64().unwrap_or(0),
+                    column: f["column"].as_i64().unwrap_or(0) + 1,
+                })
+            })
+            .collect();
+        if !out.is_empty() {
+            return out;
         }
     }
-    // Fallback: the top frame's raw bundle position.
-    let top = frames.first();
-    let url = top.map(frame_url).unwrap_or_default();
-    let file = url.rsplit('/').next().unwrap_or(&url).to_string();
-    let line = top.and_then(|f| f["location"]["lineNumber"].as_i64()).unwrap_or(0) + 1;
-    (file, line)
+    raw
 }
 
 /// Read frames until the response with `id` arrives (bounded), returning its `result`.
