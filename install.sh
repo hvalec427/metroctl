@@ -11,11 +11,14 @@ else
   FILE="metroctl-darwin-x64"
 fi
 
-# `dev` → newest prerelease; a version string → that exact tag; else latest stable.
+# `dev` → rolling dev build; `nightly` → newest nightly; a version string → that
+# exact tag; else latest stable.
 if [ "$1" = "dev" ]; then
+  VERSION="dev"
+elif [ "$1" = "nightly" ]; then
   # GitHub's /releases list isn't newest-first — version-sort and take the highest.
   VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=30" \
-    | grep '"tag_name"' | grep dev | cut -d'"' -f4 | sort -V | tail -1)
+    | grep '"tag_name"' | grep nightly | cut -d'"' -f4 | sort -V | tail -1)
 elif [ -n "$1" ]; then
   VERSION="$1"
 else

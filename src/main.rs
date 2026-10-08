@@ -11,6 +11,7 @@ mod rnconfig;
 mod rndash;
 mod rntui;
 mod rnview;
+mod update;
 
 use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
@@ -38,6 +39,28 @@ enum Command {
         #[arg(long = "print-ws")]
         print_ws: bool,
     },
+    /// Check whether a newer version of metroctl is available
+    #[command(name = "check-update")]
+    CheckUpdate {
+        #[arg(long)]
+        stable: bool,
+        #[arg(long)]
+        nightly: bool,
+        #[arg(long)]
+        dev: bool,
+    },
+    /// Update metroctl to the latest version (remembers the channel)
+    Update {
+        #[arg(long)]
+        stable: bool,
+        #[arg(long)]
+        nightly: bool,
+        #[arg(long)]
+        dev: bool,
+        /// Install the channel's latest even if it's the same or an older version
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -47,6 +70,8 @@ fn main() {
         Some(Command::Init) => commands_rn::init(),
         Some(Command::Config) => commands_rn::print_config_path(),
         Some(Command::Logs { name, port, print_ws }) => logs(name, port, print_ws),
+        Some(Command::CheckUpdate { stable, nightly, dev }) => update::check_update(stable, nightly, dev),
+        Some(Command::Update { stable, nightly, dev, force }) => update::update(stable, nightly, dev, force),
     }
 }
 
