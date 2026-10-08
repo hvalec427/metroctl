@@ -47,6 +47,8 @@ pub struct DapFrame {
 pub enum DebugEvent {
     Paused { frames: Vec<DapFrame>, reason: String, raw_frames: Value },
     Resumed,
+    /// A console line / exception, mirrored to the editor's debug console.
+    Output { category: String, output: String },
 }
 
 /// Shared slot holding the attached DAP session's event stream. It lives above
@@ -425,6 +427,11 @@ fn handle_message(
             let level = p["type"].as_str().unwrap_or("log").to_string();
             let args = p["args"].as_array().cloned().unwrap_or_default();
             let text = args.iter().map(render_arg).collect::<Vec<_>>().join(" ");
+            // Mirror to the editor's debug console (before `text`/`level` move).
+            if let Some(de) = debug_sink.lock().unwrap().as_ref() {
+                let category = if level == "error" || level == "assert" { "stderr" } else { "stdout" };
+                let _ = de.send(DebugEvent::Output { category: category.into(), output: format!("{text}\n") });
+            }
             // Eagerly expand the first object arg into a JS tree via getProperties.
             let mut expanded = None;
             for a in &args {
@@ -451,6 +458,9 @@ fn handle_message(
             let d = &msg["params"]["exceptionDetails"];
             learn_scripts(scripts, &d["stackTrace"]);
             let text = d["exception"]["description"].as_str().or_else(|| d["text"].as_str()).unwrap_or("Uncaught exception").to_string();
+            if let Some(de) = debug_sink.lock().unwrap().as_ref() {
+                let _ = de.send(DebugEvent::Output { category: "stderr".into(), output: format!("{text}\n") });
+            }
             let stack = stack_frames(&d["stackTrace"], port);
             let _ = tx.send(RnEvent::Log(key.into(), LogEntry { kind: "console".into(), level: "error".into(), text, expanded: None, stack }));
         }

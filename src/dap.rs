@@ -102,6 +102,9 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                                     refs.lock().unwrap().clear();
                                     event(&w, &sq, "continued", json!({"threadId": 1, "allThreadsContinued": true}));
                                 }
+                                DebugEvent::Output { category, output } => {
+                                    event(&w, &sq, "output", json!({ "category": category, "output": output }));
+                                }
                             }
                         }
                     });
