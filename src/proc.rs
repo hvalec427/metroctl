@@ -25,6 +25,11 @@ pub struct PtyProcess {
     exit: Arc<Mutex<Option<u32>>>,
     rows: u16,
     cols: u16,
+    /// Autoscroll: keep the view on the live bottom. Off = stay put while new
+    /// output arrives (vt100 shifts a non-zero scrollback offset by itself;
+    /// `pin` covers the paused-at-bottom case it doesn't).
+    pub follow: bool,
+    pin: usize, // scrollback length when last rendered while paused
 }
 
 impl PtyProcess {
@@ -84,6 +89,8 @@ impl PtyProcess {
             exit: Arc::new(Mutex::new(None)),
             rows,
             cols,
+            follow: true,
+            pin: 0,
         })
     }
 
@@ -121,6 +128,80 @@ impl PtyProcess {
         if let Ok(mut p) = self.parser.lock() {
             p.set_size(rows, cols);
         }
+    }
+
+    /// Current scrollback offset (0 = bottom).
+    pub fn scroll_offset(&self) -> usize {
+        self.parser.lock().map(|p| p.screen().scrollback()).unwrap_or(0)
+    }
+
+    /// Scroll into history by `delta` lines (negative = toward the bottom).
+    /// Scrolling up pauses autoscroll so the view doesn't jump back.
+    pub fn scroll_by(&mut self, delta: isize) {
+        if delta > 0 {
+            self.pause();
+        }
+        if let Ok(mut p) = self.parser.lock() {
+            let off = p.screen().scrollback().saturating_add_signed(delta);
+            p.set_scrollback(off); // clamped to the available history
+        }
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_by(isize::MAX);
+    }
+
+    /// Jump to the bottom and resume autoscroll.
+    pub fn scroll_to_bottom(&mut self) {
+        self.follow = true;
+        if let Ok(mut p) = self.parser.lock() {
+            p.set_scrollback(0);
+        }
+    }
+
+    pub fn toggle_follow(&mut self) {
+        if self.follow {
+            self.pause();
+        } else {
+            self.scroll_to_bottom();
+        }
+    }
+
+    fn pause(&mut self) {
+        if self.follow {
+            self.follow = false;
+            self.pin = self.scrollback_len();
+        }
+    }
+
+    fn scrollback_len(&self) -> usize {
+        let Ok(mut p) = self.parser.lock() else {
+            return 0;
+        };
+        let off = p.screen().scrollback();
+        p.set_scrollback(usize::MAX);
+        let len = p.screen().scrollback();
+        p.set_scrollback(off);
+        len
+    }
+
+    /// Before rendering: keep a paused view anchored. vt100 only shifts the
+    /// offset when it's already > 0, so a view paused at the bottom is moved
+    /// up by however many lines arrived since.
+    pub fn sync_scroll(&mut self) {
+        if self.follow {
+            if let Ok(mut p) = self.parser.lock() {
+                p.set_scrollback(0);
+            }
+            return;
+        }
+        let len = self.scrollback_len();
+        if let Ok(mut p) = self.parser.lock() {
+            if p.screen().scrollback() == 0 && len > self.pin {
+                p.set_scrollback(len - self.pin);
+            }
+        }
+        self.pin = len;
     }
 
     /// Clone handle to the parser so the renderer can read the screen.
@@ -164,6 +245,25 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "child output never reached the screen");
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+
+    #[test]
+    fn paused_view_stays_put_while_output_arrives() {
+        let env = BTreeMap::new();
+        let mut p = PtyProcess::spawn("test", "seq 1 50; sleep 0.5; seq 51 100", Path::new("/"), &env, 10, 40).expect("spawn");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        p.toggle_follow(); // pause at the bottom, showing up to line 50
+        let bottom_row = |p: &PtyProcess| p.parser().lock().unwrap().screen().rows(0, 40).nth(8).unwrap_or_default();
+        p.sync_scroll();
+        let before = bottom_row(&p);
+        assert_eq!(before.trim(), "50");
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        p.sync_scroll();
+        assert_eq!(bottom_row(&p), before, "paused view moved");
+        p.scroll_to_bottom();
+        p.sync_scroll();
+        assert_eq!(p.scroll_offset(), 0);
+        assert!(p.follow);
     }
 
     #[test]

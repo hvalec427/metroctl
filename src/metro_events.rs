@@ -41,7 +41,7 @@ fn listener_info(port: u16) -> Option<(String, Option<String>)> {
 }
 
 /// Short `pid 1234 · ~/dev/app` description of whatever holds the port.
-fn describe_listener(port: u16) -> String {
+pub fn describe_listener(port: u16) -> String {
     match listener_info(port) {
         Some((pid, cwd)) => {
             let home = std::env::var("HOME").unwrap_or_default();

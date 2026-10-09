@@ -69,6 +69,16 @@ struct DeviceRow {
 }
 
 impl DeviceRow {
+    /// Section in the Devices pane (also the sort order).
+    fn group(&self) -> (u8, &'static str) {
+        match (self.platform, self.boot.is_some()) {
+            (Platform::Ios, true) => (0, "iOS Simulators"),
+            (Platform::Ios, false) => (1, "iOS Devices"),
+            (Platform::Android, true) => (2, "Android Emulators"),
+            (Platform::Android, false) => (3, "Android Devices"),
+        }
+    }
+
     /// iOS device/simulator udid (known even before boot, from the boot target).
     fn ios_udid(&self) -> Option<String> {
         if let Some(OpenTarget::IosSim(u)) | Some(OpenTarget::IosPhysical(u)) = &self.open {
@@ -93,7 +103,6 @@ pub struct DashApp {
     project: ProjectConfig,
     procs: Vec<PtyProcess>,
     proc_sel: usize,
-    proc_scroll: usize, // scrollback offset for the focused process (0 = live)
     metro_idx: Option<usize>,
     metro_external: bool, // metro_idx is a watcher tab for a Metro started outside metroctl
     client: RnClient,
@@ -110,6 +119,7 @@ pub struct DashApp {
     h_split: u16, // % width of the processes pane vs devices
     confirm_quit: bool,
     link_picker: bool, // deep-link quick-picker overlay
+    help: Option<u16>, // `?` key-reference popup, with its scroll offset
     quit: bool,
 }
 
@@ -166,7 +176,10 @@ impl DashApp {
                 // Installed sims/emulators (bootable; openable once running) …
                 let mut rows: Vec<DeviceRow> = Vec::new();
                 for d in get_all_installed(None) {
-                    let label = d.label();
+                    let label = match &d {
+                        InstalledDevice::IosSim { name, runtime, .. } => format!("{name}  {runtime}"),
+                        InstalledDevice::AndroidAvd { name, .. } => name.clone(),
+                    };
                     let running = d.running();
                     let row = match &d {
                         InstalledDevice::IosSim { udid, .. } => DeviceRow {
@@ -205,10 +218,10 @@ impl DashApp {
                 // … plus any connected physical devices (already running, not bootable).
                 for d in &running_devices {
                     match d {
-                        RunningDevice::IosPhysical { udid, .. } => {
+                        RunningDevice::IosPhysical { name, udid, os_version } => {
                             let extra = ios_details.get(udid);
                             rows.push(DeviceRow {
-                                label: d.label(),
+                                label: format!("{name}  iOS {os_version}"),
                                 platform: Platform::Ios,
                                 running: true,
                                 boot: None,
@@ -222,7 +235,7 @@ impl DashApp {
                         RunningDevice::AndroidPhysical { serial, .. } => {
                             let (installed, foreground) = android_state(serial);
                             rows.push(DeviceRow {
-                                label: d.label(),
+                                label: d.name().to_string(),
                                 platform: Platform::Android,
                                 running: true,
                                 boot: None,
@@ -239,7 +252,7 @@ impl DashApp {
                 // Phones adb can see but not use yet, so they don't silently vanish.
                 for (serial, problem) in devinfo::android_unready() {
                     rows.push(DeviceRow {
-                        label: format!("{serial}  (physical)"),
+                        label: serial,
                         platform: Platform::Android,
                         running: false,
                         boot: None,
@@ -250,6 +263,8 @@ impl DashApp {
                         problem: Some(problem),
                     });
                 }
+                // Group as the pane shows them: iOS sims, iPhones, Android emulators, phones.
+                rows.sort_by_key(|r| r.group());
                 if dev_tx.send(DashMsg::Devices(rows)).is_err() {
                     break;
                 }
@@ -258,11 +273,11 @@ impl DashApp {
         });
         let mut rnview = RnView::new(None);
         rnview.set_root(Some(project.root.clone()));
+        rnview.set_embedded(true);
         DashApp {
             project,
             procs: Vec::new(),
             proc_sel: 0,
-            proc_scroll: 0,
             metro_idx: None,
             metro_external: false,
             client,
@@ -279,6 +294,7 @@ impl DashApp {
             h_split: 60,
             confirm_quit: false,
             link_picker: false,
+            help: None,
             quit: false,
         }
     }
@@ -304,7 +320,6 @@ impl DashApp {
         match PtyProcess::spawn(label, command, &self.root(), &env, rows, cols) {
             Ok(p) => {
                 self.procs.push(p);
-                self.proc_scroll = 0; // follow the fresh output
                 Some(self.procs.len() - 1)
             }
             Err(e) => {
@@ -355,7 +370,6 @@ impl DashApp {
                 Ok(p) => {
                     self.procs[i] = p;
                     self.proc_sel = i;
-                    self.proc_scroll = 0;
                     let took_over = std::mem::take(&mut self.metro_external);
                     self.set_flash(if took_over { "took over external Metro" } else { "restarted Metro" });
                 }
@@ -534,6 +548,37 @@ impl DashApp {
     }
 
     /// Stop (kill) the process in the current Processes sub-tab.
+    fn with_proc(&mut self, f: impl FnOnce(&mut PtyProcess)) {
+        if let Some(p) = self.procs.get_mut(self.proc_sel) {
+            f(p);
+        }
+    }
+
+    /// Remove a finished process's tab. Running ones must be stopped (x) first.
+    fn delete_selected_proc(&mut self) {
+        let i = self.proc_sel;
+        let Some(p) = self.procs.get(i) else {
+            return;
+        };
+        if p.is_alive() {
+            self.set_flash(format!("{} is still running — stop it first (x)", p.label));
+            return;
+        }
+        let label = self.procs.remove(i).label.clone();
+        self.metro_idx = match self.metro_idx {
+            Some(m) if m == i => {
+                self.metro_external = false;
+                None
+            }
+            Some(m) if m > i => Some(m - 1),
+            other => other,
+        };
+        if self.proc_sel >= self.procs.len() {
+            self.proc_sel = self.procs.len().saturating_sub(1);
+        }
+        self.set_flash(format!("removed {label}"));
+    }
+
     fn stop_selected_proc(&mut self) {
         let msg = match self.procs.get_mut(self.proc_sel) {
             Some(p) => {
@@ -719,6 +764,20 @@ impl DashApp {
         }
 
         // Deep-link quick-picker: a digit/letter opens that link; Esc closes.
+        // Key reference popup: scrolls like any list; ?/Esc/q close it.
+        if let Some(top) = self.help.as_mut() {
+            match key.code {
+                KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => self.help = None,
+                KeyCode::Char('j') | KeyCode::Down => *top = top.saturating_add(1),
+                KeyCode::Char('k') | KeyCode::Up => *top = top.saturating_sub(1),
+                KeyCode::Char('g') => *top = 0,
+                KeyCode::Char('G') => *top = u16::MAX,
+                _ if ctrl_c => self.help = None,
+                _ => {}
+            }
+            return;
+        }
+
         if self.link_picker {
             if key.code == KeyCode::Esc {
                 self.link_picker = false;
@@ -771,6 +830,10 @@ impl DashApp {
                     self.confirm_quit = true;
                     return;
                 }
+                KeyCode::Char('?') => {
+                    self.help = Some(0);
+                    return;
+                }
                 KeyCode::Char('R') => return self.metro_key(b'r', "reload"),
                 KeyCode::Char('D') => return self.metro_key(b'd', "dev menu"),
                 _ => {}
@@ -790,19 +853,15 @@ impl DashApp {
     }
 
     fn processes_key(&mut self, key: KeyEvent) {
-        // Rough page size for scrolling the output.
-        let page = self.proc_area.map(|r| r.height as usize).unwrap_or(20).max(1);
         match key.code {
             KeyCode::Char('[') => {
                 if !self.procs.is_empty() {
                     self.proc_sel = (self.proc_sel + self.procs.len() - 1) % self.procs.len();
-                    self.proc_scroll = 0; // each tab shows live until scrolled
                 }
             }
             KeyCode::Char(']') => {
                 if !self.procs.is_empty() {
                     self.proc_sel = (self.proc_sel + 1) % self.procs.len();
-                    self.proc_scroll = 0;
                 }
             }
             KeyCode::Enter if self.metro_external && self.metro_idx == Some(self.proc_sel) => {
@@ -815,14 +874,14 @@ impl DashApp {
                     self.set_flash("no running process in this tab");
                 }
             }
-            // Scroll the output into history (0 = live bottom). Capped at the vt100 scrollback.
-            KeyCode::Char('k') | KeyCode::Up => self.proc_scroll = (self.proc_scroll + 1).min(5000),
-            KeyCode::Char('j') | KeyCode::Down => self.proc_scroll = self.proc_scroll.saturating_sub(1),
-            KeyCode::Char('K') | KeyCode::PageUp => self.proc_scroll = (self.proc_scroll + page).min(5000),
-            KeyCode::Char('J') | KeyCode::PageDown => self.proc_scroll = self.proc_scroll.saturating_sub(page),
-            KeyCode::Char('g') => self.proc_scroll = 5000,
-            KeyCode::Char('G') => self.proc_scroll = 0,
+            // Scroll the output (each tab keeps its own position and autoscroll).
+            KeyCode::Char('k') | KeyCode::Up => self.with_proc(|p| p.scroll_by(1)),
+            KeyCode::Char('j') | KeyCode::Down => self.with_proc(|p| p.scroll_by(-1)),
+            KeyCode::Char('g') => self.with_proc(|p| p.scroll_to_top()),
+            KeyCode::Char('G') => self.with_proc(|p| p.scroll_to_bottom()),
+            KeyCode::Char(' ') => self.with_proc(|p| p.toggle_follow()),
             KeyCode::Char('x') => self.stop_selected_proc(),
+            KeyCode::Char('d') => self.delete_selected_proc(),
             KeyCode::Char('m') => self.start_metro(),
             KeyCode::Char('c') => self.deep_clean(),
             KeyCode::Char('i') => self.reinstall(),
@@ -839,6 +898,8 @@ impl DashApp {
                     self.dev_sel = (self.dev_sel + 1).min(self.devices.len() - 1);
                 }
             }
+            KeyCode::Char('g') => self.dev_sel = 0,
+            KeyCode::Char('G') => self.dev_sel = self.devices.len().saturating_sub(1),
             KeyCode::Enter => self.start_selected_device(),
             KeyCode::Char('b') => self.install_selected(),
             KeyCode::Char('s') => self.stop_selected_device(),
@@ -924,6 +985,9 @@ fn render(app: &mut DashApp, frame: &mut Frame) {
     if app.link_picker {
         render_link_picker(app, frame, area);
     }
+    if app.help.is_some() {
+        render_help(app, frame, area);
+    }
     if app.confirm_quit {
         render_quit_popup(frame, area);
     }
@@ -950,6 +1014,120 @@ fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
         })
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+type KeySection = (&'static str, &'static [(&'static str, &'static str)]);
+
+// Left / right columns of the `?` popup (stacked when the terminal is narrow).
+const HELP_LEFT: &[KeySection] = &[
+    ("Global", &[
+        ("⇥ / ⇧⇥", "next / previous pane"),
+        ("^←→↑↓", "resize panes"),
+        ("R", "reload the app"),
+        ("D", "open the dev menu"),
+        ("?", "this help"),
+        ("q / ^C", "quit"),
+    ]),
+    ("Every pane", &[
+        ("j k  ↑ ↓", "move / scroll"),
+        ("g  G", "top / bottom"),
+        ("space", "autoscroll on/off"),
+        ("[  ]", "previous / next tab"),
+    ]),
+    ("Processes", &[
+        ("⏎", "type into the process (Esc leaves)"),
+        ("x", "stop it"),
+        ("d", "delete a stopped tab"),
+        ("m", "start / restart Metro (takes over an external one)"),
+        ("c", "deep clean (reinstalls)"),
+        ("i", "reinstall deps + pods"),
+        ("a", "reset: deep clean, then Metro"),
+    ]),
+    ("Devices", &[
+        ("⏎", "start the simulator / emulator"),
+        ("s", "stop it"),
+        ("b", "build & run on it"),
+        ("o", "open the app"),
+        ("l", "open a deep link"),
+    ]),
+];
+
+const HELP_RIGHT: &[KeySection] = &[
+    ("Logs · Network · Perf", &[
+        ("1-9", "switch device"),
+        ("/  n N", "search, next / previous match"),
+        ("f", "filter"),
+        ("⏎", "open the entry"),
+        ("z", "open maximized / toggle split"),
+        ("V", "visual select, then y"),
+        ("y", "copy"),
+        ("c", "clear"),
+        ("p", "clear on reload on/off"),
+    ]),
+    ("Open entry", &[
+        ("⏎ / Esc", "close"),
+        ("J K", "scroll the entry (split view)"),
+        ("{  }", "previous / next section"),
+        ("o", "open file:line in nvim"),
+        ("F", "show framework stack frames"),
+    ]),
+    ("Network", &[
+        ("e", "errors only"),
+        ("m", "cycle method filter"),
+        ("c / C", "copy as curl"),
+    ]),
+    ("Debugger (paused)", &[
+        ("F5", "continue"),
+        ("F10", "step over"),
+        ("F11 / ⇧F11", "step into / out"),
+        ("F6", "pause"),
+    ]),
+];
+
+fn help_lines(sections: &[KeySection]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (i, (title, keys)) in sections.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(format!(" {title}"), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        for (k, desc) in keys.iter() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("   {k:<12}"), Style::default().fg(Color::Yellow)),
+                Span::raw(*desc),
+            ]));
+        }
+    }
+    lines
+}
+
+fn render_help(app: &mut DashApp, frame: &mut Frame, area: Rect) {
+    let (left, right) = (help_lines(HELP_LEFT), help_lines(HELP_RIGHT));
+    let two_cols = area.width >= 110;
+    let content_h = if two_cols { left.len().max(right.len()) } else { left.len() + 1 + right.len() } as u16;
+    let w = if two_cols { 120 } else { 64 };
+    let r = centered(area, w, content_h + 2);
+    frame.render_widget(Clear, r);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Keys ")
+        .title_bottom(Line::from(" ? / esc close ").right_aligned());
+    let inner = block.inner(r);
+    frame.render_widget(block, r);
+    // Clamp the scroll so G lands on the last page.
+    let top = app.help.unwrap_or(0).min(content_h.saturating_sub(inner.height));
+    app.help = Some(top);
+    if two_cols {
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
+        frame.render_widget(Paragraph::new(Text::from(left)).scroll((top, 0)), cols[0]);
+        frame.render_widget(Paragraph::new(Text::from(right)).scroll((top, 0)), cols[1]);
+    } else {
+        let mut all = left;
+        all.push(Line::raw(""));
+        all.extend(right);
+        frame.render_widget(Paragraph::new(Text::from(all)).scroll((top, 0)), inner);
+    }
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
@@ -1058,17 +1236,23 @@ fn render_processes(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     };
     app.proc_area = Some(body);
 
-    match app.procs.get(app.proc_sel) {
+    match app.procs.get_mut(app.proc_sel) {
         // Keep showing the output whether the process is running or finished —
         // the tab label carries the ✓ / ✗exit status. This way a clean/install
         // that failed still shows WHY on screen.
         Some(p) => {
+            p.sync_scroll();
             if let Some(ca) = cmd_area {
-                let marker = if app.proc_scroll > 0 { format!("  [↑ {} — G: live]", app.proc_scroll) } else { String::new() };
+                let off = p.scroll_offset();
+                let marker = match (p.follow, off) {
+                    (true, _) => String::new(),
+                    (false, 0) => "  [paused]".into(),
+                    (false, n) => format!("  [paused ↑{n}]"),
+                };
                 let head = format!("$ {}{marker}", p.cmd);
                 frame.render_widget(Paragraph::new(head).style(Style::default().fg(Color::DarkGray)), ca);
             }
-            let lines = pty_lines(&p.parser(), body.width, body.height, app.proc_scroll);
+            let lines = pty_lines(&p.parser(), body.width, body.height);
             frame.render_widget(Paragraph::new(Text::from(lines)), body);
         }
         None => {
@@ -1077,7 +1261,7 @@ fn render_processes(app: &mut DashApp, frame: &mut Frame, area: Rect) {
         }
     }
     if let Some(h) = hint {
-        render_hint(frame, h, " [ ] tab · ⏎ type · x stop · kj/JK scroll · G live · m metro · c clean · i install · a reset", focused);
+        render_hint(frame, h, " ⏎ type · x stop · d delete · m metro · c clean · i install · a reset", focused);
     }
 }
 
@@ -1102,12 +1286,24 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     if app.devices.is_empty() {
         lines.push(Line::styled("  (no simulators/emulators found)", Style::default().fg(Color::DarkGray)));
     }
+    let mut group = None;
+    let mut sel_line = 0;
     for (i, d) in app.devices.iter().enumerate() {
+        if group != Some(d.group()) {
+            group = Some(d.group());
+            if i > 0 {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::styled(format!(" {}", d.group().1), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        }
         let marker = if d.running {
             Span::styled("● ", Style::default().fg(Color::Green))
         } else {
             Span::styled("○ ", Style::default().fg(Color::DarkGray))
         };
+        if i == app.dev_sel {
+            sel_line = lines.len();
+        }
         let name_style = if focused && i == app.dev_sel {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
@@ -1131,17 +1327,20 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
         }
         lines.push(Line::from(spans));
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), content);
+    // Scroll just enough to keep the selected row on screen.
+    let h = content.height as usize;
+    let top = (sel_line + 1).saturating_sub(h) as u16;
+    frame.render_widget(Paragraph::new(Text::from(lines)).scroll((top, 0)), content);
     if let Some(h) = hint {
         // Start/stop boot or shut down a simulator/emulator, so only offer the
         // one that applies to the highlighted row (neither for a real device).
         let sim = app.devices.get(app.dev_sel).filter(|d| d.boot.is_some());
         let power = match sim {
-            Some(d) if d.running => " · s stop",
-            Some(_) => " · ⏎ start",
+            Some(d) if d.running => "s stop · ",
+            Some(_) => "⏎ start · ",
             None => "",
         };
-        render_hint(frame, h, &format!(" ↑↓ sel{power} · b build · o open · l links"), focused);
+        render_hint(frame, h, &format!(" {power}b build · o open · l links"), focused);
     }
 }
 
@@ -1169,8 +1368,10 @@ fn render_status(app: &DashApp, frame: &mut Frame, area: Rect) {
         format!(" {f}")
     } else if app.input_mode {
         " INPUT — keys go to the process · Esc to exit".into()
+    } else if let Some(e) = &app.client.dap_error {
+        format!(" ⚠ {e}")
     } else {
-        " ⇥ focus · ^←→↑↓ resize · R reload · D dev-menu · q quit".into()
+        " ⇥ focus · ^←→↑↓ resize · R reload · D dev-menu · ? keys · q quit".into()
     };
     let w = area.width as usize;
     let padded = {
@@ -1184,12 +1385,11 @@ fn render_status(app: &DashApp, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(padded).style(style), area);
 }
 
-fn pty_lines(parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, width: u16, height: u16, scrollback: usize) -> Vec<Line<'static>> {
-    let mut guard = match parser.lock() {
+fn pty_lines(parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, width: u16, height: u16) -> Vec<Line<'static>> {
+    let guard = match parser.lock() {
         Ok(g) => g,
         Err(_) => return Vec::new(),
     };
-    guard.set_scrollback(scrollback); // 0 = live bottom; >0 scrolls into history
     let screen = guard.screen();
     let (srows, scols) = screen.size();
     let h = height.min(srows);

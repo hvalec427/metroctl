@@ -152,6 +152,8 @@ pub struct RnClient {
     pub rx: Receiver<RnEvent>,
     cmd_senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>,
     port: u16,
+    /// Why the editor-facing DAP server isn't running, if it isn't.
+    pub dap_error: Option<String>,
 }
 
 impl RnClient {
@@ -166,9 +168,15 @@ impl RnClient {
         let bundle_poll = bundle.clone();
         std::thread::spawn(move || poll_loop(port, evt, senders, sink, bundle_poll));
         // Expose this metroctl's single Hermes debugger to editors over DAP.
-        let dap_senders = cmd_senders.clone();
-        std::thread::spawn(move || dap::serve(dap_senders, debug_sink, bundle));
-        RnClient { rx, cmd_senders, port }
+        let dap_error = match dap::bind() {
+            Ok(listener) => {
+                let dap_senders = cmd_senders.clone();
+                std::thread::spawn(move || dap::serve(listener, dap_senders, debug_sink, bundle));
+                None
+            }
+            Err(e) => Some(e),
+        };
+        RnClient { rx, cmd_senders, port, dap_error }
     }
 
     pub fn send(&self, key: &str, cmd: ConnCmd) {

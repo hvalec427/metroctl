@@ -28,3 +28,10 @@ sourcemap = "9"
 [profile.release]
 strip = true
 lto = true
+
+# vt100 0.15's visible_rows() computes `rows - scrollback_offset`, which
+# underflows once you scroll back more than a screen. Release builds wrap and
+# render correctly; keep dev builds from panicking on it. (0.16 fixes it but
+# conflicts with ratatui 0.29's pinned unicode-width.)
+[profile.dev.package.vt100]
+overflow-checks = false

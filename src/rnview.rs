@@ -291,6 +291,7 @@ pub struct RnView {
     method_idx: usize,
     flash: Option<String>,
     focused: bool, // when embedded: dim the footer unless the logs pane is active
+    embedded: bool, // inside the dashboard, whose status bar already lists R/q
     // Vim-style linewise visual selection. The anchor is a list-row index when
     // the list is active, or a wrapped-preview-line index when maximized.
     visual: Option<usize>,
@@ -325,6 +326,7 @@ impl RnView {
             method_idx: 0,
             flash: None,
             focused: true,
+            embedded: false,
             visual: None,
             detail_cursor: 0,
             root: None,
@@ -348,6 +350,10 @@ impl RnView {
     /// When embedded in the dashboard, controls whether the footer is shown
     /// bright (active pane) or blank (another pane has focus). Standalone
     /// `logs --rn` leaves this true.
+    pub fn set_embedded(&mut self, embedded: bool) {
+        self.embedded = embedded;
+    }
+
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
     }
@@ -704,7 +710,8 @@ fn render_view(view: &mut RnView, frame: &mut Frame, area: Rect) {
     let paused = d.and_then(|d| d.paused.as_ref());
     let head = match paused {
         Some(p) => format!(" ⏸ PAUSED {}:{} — F5 continue · F10 over · F11 into · ⇧F11 out · F6 pause", p.file, p.line),
-        None => format!(" {who} · {status}{meta_str}{filter_str}{net_filters} · {restart}   {tabbar}"),
+        // Autoscroll state (space toggles it, like every scrollable list).
+        None => format!(" {who} · {status}{meta_str}{filter_str}{net_filters} · {restart}{}   {tabbar}", if view.follow { "" } else { " · paused" }),
     };
     let head_style = if paused.is_some() {
         Style::default().bg(Color::Rgb(191, 97, 106)).fg(Color::White).add_modifier(Modifier::BOLD)
@@ -851,29 +858,30 @@ fn footer(view: &RnView, is_logs: bool) -> String {
         Mode::Search => format!("search: {}▏", view.input),
         Mode::Filter => format!("filter: {}▏", view.input),
         Mode::Normal => {
+            // Standalone only: the dashboard shows R/q as global keys.
+            let (reload, quit) = if view.embedded { ("", "") } else { (" · R reload", " · q quit") };
+            // Device switching only matters with more than one connected.
+            let devs = if view.targets.len() > 1 { " 1-9 devices ·" } else { "" };
             if let Some(f) = &view.flash {
                 return format!(" {f}");
             }
             if view.visual.is_some() {
                 let what = if view.maximized { "lines" } else { "rows" };
-                return format!(" VISUAL ({what}) · jk extend · y yank · V/esc cancel");
+                return format!(" VISUAL ({what}) · y yank · V/esc cancel");
             }
             if view.tab == Tab::Perf {
-                return " [ ] tabs · 1-9 dev · live JS FPS + heap · R reload · q quit".into();
+                return format!("{devs} live JS FPS + heap{reload}{quit}");
             }
             if view.detail {
                 let nn = if view.search.is_empty() { "" } else { " · n/N" };
                 let z = if view.maximized { "z split" } else { "z max" };
                 let copy = if is_logs { " · F frames" } else { " · c curl" };
-                // side-by-side: jk moves the list, JK the panel; maximized: both move the panel.
-                let nav = if view.maximized { "jk/JK move" } else { "jk list · JK move" };
-                return format!(" ⏎ close · {z} · {nav} · {{}} sect · / search{nn} · V select · y copy{copy} · o nvim · q quit");
+                return format!(" ⏎ close · {z} · {{}} sect · / search{nn} · V select · y copy{copy} · o nvim{quit}");
             }
             let nn = if view.search.is_empty() { "" } else { " · n/N" };
-            let scroll = if view.follow { "on" } else { "off" };
             let netf = if is_logs { "" } else { " · e errors · m method" };
             let restart = if view.clear_on_restart { "clear" } else { "keep" };
-            format!(" [ ] tabs · 1-9 dev · jk/g/G move · / search{nn} · f filter · ⏎ preview · z max · V select · y copy{netf} · space/a scroll:{scroll} · c clear · p reload:{restart} · R reload · q quit")
+            format!("{devs} / search{nn} · f filter · ⏎ preview · z max · V select · y copy{netf} · c clear · p reload:{restart}{reload}{quit}")
         }
     }
 }

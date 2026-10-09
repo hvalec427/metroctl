@@ -22,13 +22,21 @@ type Senders = Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>;
 type Writer = Arc<Mutex<TcpStream>>;
 type Seq = Arc<Mutex<i64>>;
 
-pub fn serve(senders: Senders, debug_sink: DebugSink, bundle: UrlSlot) {
+/// Bind the DAP port (9223, or `METROCTL_DAP_PORT`). On failure, says why —
+/// usually another metroctl (or anything else) already holding the port, in
+/// which case editors would attach to *that* one.
+pub fn bind() -> Result<TcpListener, String> {
     let port: u16 = std::env::var("METROCTL_DAP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9223);
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        // Port busy (e.g. another metroctl already listening) — just skip.
-        Err(_) => return,
-    };
+    TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            format!("debugger off: :{port} is taken by {} (set METROCTL_DAP_PORT to use another)", crate::metro_events::describe_listener(port))
+        } else {
+            format!("debugger off: can't listen on :{port}: {e}")
+        }
+    })
+}
+
+pub fn serve(listener: TcpListener, senders: Senders, debug_sink: DebugSink, bundle: UrlSlot) {
     for stream in listener.incoming().flatten() {
         let senders = senders.clone();
         let sink = debug_sink.clone();
@@ -60,6 +68,7 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
 
     while let Some(msg) = read_message(&mut reader)? {
         let command = msg["command"].as_str().unwrap_or("").to_string();
+        super::cdp_trace("dap<<", &command);
         let req_seq = msg["seq"].as_i64().unwrap_or(0);
         match command.as_str() {
             "initialize" => {
@@ -76,7 +85,11 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                 event(&writer, &seq, "initialized", json!({}));
             }
             "attach" | "launch" => {
-                let _ = wait_for_target(&senders);
+                // Answer right away: nvim-dap warns "Debug adapter didn't
+                // respond" if attach takes over 4s. Waiting for the app's
+                // Hermes connection happens before the first breakpoint
+                // request instead, which has no such deadline.
+                respond(&writer, &seq, req_seq, &command, json!({}));
                 // Register our event stream in the shared slot; every current
                 // and future Hermes connection fans Debugger events here, so a
                 // Metro reload doesn't detach us.
@@ -109,12 +122,13 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                         }
                     });
                 }
-                respond(&writer, &seq, req_seq, &command, json!({}));
             }
             "configurationDone" => respond(&writer, &seq, req_seq, &command, json!({})),
             "setBreakpoints" => {
                 let src_path = msg["arguments"]["source"]["path"].as_str().unwrap_or("").to_string();
                 let want = msg["arguments"]["breakpoints"].as_array().cloned().unwrap_or_default();
+                // Breakpoints go to Hermes, so give the app a moment to connect.
+                let _ = wait_for_target(&senders);
 
                 // Clear this file's previous breakpoints before re-setting.
                 if let Some(old) = bps_by_src.remove(&src_path) {
