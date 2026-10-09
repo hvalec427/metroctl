@@ -3,7 +3,7 @@
 //! itself into an arbitrary `Rect` (the full screen for `logs --rn`, a pane in
 //! `metroctl`). Extracted from the old `rntui` so both share one implementation.
 
-use crate::rnclient::{format_js, ConnCmd, LogEntry, NetRecord, PausedInfo, RnClient, RnEvent, Status, TargetInfo};
+use crate::rnclient::{format_js, ConnCmd, FRAMEWORK_FRAME, LogEntry, NetRecord, PausedInfo, RnClient, RnEvent, Status, TargetInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
@@ -123,7 +123,7 @@ fn pretty_or_raw(body: &str) -> Vec<String> {
     }
 }
 
-fn log_detail_lines(e: &LogEntry) -> Vec<String> {
+fn log_detail_lines(e: &LogEntry, show_framework: bool) -> Vec<String> {
     let mut out = if let Some(tree) = &e.expanded {
         let mut out = vec![e.text.clone(), String::new()];
         out.extend(tree.clone());
@@ -137,7 +137,11 @@ fn log_detail_lines(e: &LogEntry) -> Vec<String> {
     if let Some(stack) = &e.stack {
         out.push(String::new());
         out.push("── Stack ──".into());
-        out.extend(stack.clone());
+        let hidden = stack.iter().filter(|l| l.starts_with(FRAMEWORK_FRAME)).count();
+        out.extend(stack.iter().filter(|l| show_framework || !l.starts_with(FRAMEWORK_FRAME)).cloned());
+        if hidden > 0 && !show_framework {
+            out.push(format!("  ({hidden} framework frames hidden — F to show)"));
+        }
     }
     out
 }
@@ -275,6 +279,7 @@ pub struct RnView {
     input: String,
     clear_on_restart: bool,
     errors_only: bool,
+    show_framework: bool, // include collapsed React/RN frames in stacks
     method_idx: usize,
     flash: Option<String>,
     focused: bool, // when embedded: dim the footer unless the logs pane is active
@@ -308,6 +313,7 @@ impl RnView {
             input: String::new(),
             clear_on_restart: false,
             errors_only: false,
+            show_framework: false,
             method_idx: 0,
             flash: None,
             focused: true,
@@ -503,7 +509,7 @@ impl RnView {
         match self.tab {
             Tab::Logs => {
                 let list: Vec<&LogEntry> = d.logs.iter().filter(|e| self.filter.is_empty() || e.text.to_lowercase().contains(&self.filter.to_lowercase())).collect();
-                list.get(idx).map(|e| log_detail_lines(e)).unwrap_or_default()
+                list.get(idx).map(|e| log_detail_lines(e, self.show_framework)).unwrap_or_default()
             }
             Tab::Network => {
                 let method = METHODS[self.method_idx];
@@ -841,7 +847,7 @@ fn footer(view: &RnView, is_logs: bool) -> String {
             if view.detail {
                 let nn = if view.search.is_empty() { "" } else { " · n/N" };
                 let z = if view.maximized { "z split" } else { "z max" };
-                let copy = if is_logs { "" } else { " · c curl" };
+                let copy = if is_logs { " · F frames" } else { " · c curl" };
                 // side-by-side: jk moves the list, JK the panel; maximized: both move the panel.
                 let nav = if view.maximized { "jk/JK move" } else { "jk list · JK move" };
                 return format!(" ⏎ close · {z} · {nav} · {{}} sect · / search{nn} · V select · y copy{copy} · o nvim · q quit");
@@ -972,7 +978,9 @@ fn jump_section(view: &mut RnView, dir: i32) {
     };
     if let Some(i) = target {
         view.detail_cursor = i;
-        keep_cursor_visible(view);
+        // Pin the header to the top so its content is visible below it
+        // (clamped so the last page doesn't scroll past the end).
+        view.detail_scroll = i.min(lines.len().saturating_sub(view.view_h.max(1)));
         view.detail_hit = None;
     }
 }
@@ -1322,6 +1330,12 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
         // Jump between detail sections (── Stack ──, Request/Response headers/body …).
         KeyCode::Char('}') if view.detail => jump_section(view, 1),
         KeyCode::Char('{') if view.detail => jump_section(view, -1),
+        KeyCode::Char('F') if view.detail && view.tab == Tab::Logs => {
+            view.show_framework = !view.show_framework;
+            view.detail_cursor = view.detail_cursor.min(view.detail_wrapped().len().saturating_sub(1));
+            keep_cursor_visible(view);
+            view.flash = Some(if view.show_framework { "showing framework frames" } else { "hiding framework frames" }.into());
+        }
         KeyCode::Char('V') => {
             if view.visual.is_some() {
                 view.visual = None;

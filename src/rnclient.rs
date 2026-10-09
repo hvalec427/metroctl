@@ -74,7 +74,7 @@ pub struct LogEntry {
     pub level: String, // log | warn | error | info | ...
     pub text: String,
     pub expanded: Option<Vec<String>>, // deep object tree (already fetched), if any
-    pub stack: Option<Vec<String>>,    // call frames ("fn (file:line)"), for exceptions
+    pub stack: Option<Vec<String>>,    // call frames ("fn (file:line)"); framework ones start with FRAMEWORK_FRAME
 }
 
 #[derive(Debug, Clone, Default)]
@@ -562,6 +562,10 @@ fn handle_network(
     }
 }
 
+/// Prefix marking a frame Metro's symbolicator collapses (React/RN internals),
+/// so the view can hide or show them.
+pub const FRAMEWORK_FRAME: &str = "  · ";
+
 /// Flatten a CDP stackTrace into `function (url:line)` strings.
 /// Keep only the last few path segments so frames read like `src/utils/log.ts`.
 fn frame_line(name: &str, file: &str, line: i64) -> String {
@@ -572,7 +576,7 @@ fn frame_line(name: &str, file: &str, line: i64) -> String {
 }
 
 /// Turn a CDP stackTrace into readable lines. Tries Metro's `/symbolicate` to map
-/// bundle positions back to source files (dropping collapsed framework frames);
+/// bundle positions back to source files (marking collapsed framework frames);
 /// falls back to the raw bundle positions if symbolication isn't available.
 fn stack_frames(st: &Value, port: u16) -> Option<Vec<String>> {
     let frames = st.get("callFrames")?.as_array()?;
@@ -608,7 +612,7 @@ fn post_symbolicate(port: u16, stack: Vec<Value>) -> Option<Vec<Value>> {
 }
 
 /// Symbolicate a Runtime stackTrace (line/col top-level) into readable frame
-/// lines, dropping collapsed framework frames. CDP positions are 0-based; Metro
+/// lines, marking collapsed framework frames. CDP positions are 0-based; Metro
 /// wants a 1-based line.
 fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
     let req: Vec<Value> = frames
@@ -625,12 +629,16 @@ fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
     let mapped = post_symbolicate(port, req)?;
     let out: Vec<String> = mapped
         .iter()
-        .filter(|f| f.get("collapse").and_then(|c| c.as_bool()) != Some(true)) // drop framework frames
         .map(|f| {
             let name = f["methodName"].as_str().unwrap_or("");
             let file = f["file"].as_str().unwrap_or("");
             let line = f["lineNumber"].as_i64().unwrap_or(0);
-            frame_line(name, file, line)
+            let l = frame_line(name, file, line);
+            if f.get("collapse").and_then(|c| c.as_bool()) == Some(true) {
+                format!("{FRAMEWORK_FRAME}{}", l.trim_start())
+            } else {
+                l
+            }
         })
         .collect();
     if out.is_empty() {
