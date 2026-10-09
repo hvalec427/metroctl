@@ -725,8 +725,9 @@ fn render_body(view: &RnView, cols: usize, h: usize, d: Option<&Device>) -> Vec<
         return out;
     }
     let eff_sel = if view.follow { len.saturating_sub(1) } else { view.sel[view.tab_idx()].min(len.saturating_sub(1)) };
-    // Visual-select range over list rows (when the list is the active cursor).
-    let list_vis = view.visual.map(|a| (a.min(eff_sel), a.max(eff_sel)));
+    // Visual-select range over list rows — only when the list is the active
+    // cursor (no detail panel). With a panel open, visual targets the panel.
+    let list_vis = if view.detail { None } else { view.visual.map(|a| (a.min(eff_sel), a.max(eff_sel))) };
 
     if view.detail && len > 0 {
         let dl = view.detail_wrapped();
@@ -758,6 +759,9 @@ fn render_body(view: &RnView, cols: usize, h: usize, d: Option<&Device>) -> Vec<
         let right_w = view.detail_width;
         let left_w = cols.saturating_sub(right_w + 1);
         let list_start = eff_sel.saturating_sub(h / 2).min(len.saturating_sub(h));
+        // Panel cursor + visual range, shown on the right side.
+        let dcursor = view.detail_cursor.min(dl.len().saturating_sub(1));
+        let prev_vis = view.visual.map(|a| (a.min(dcursor), a.max(dcursor)));
         return (0..h)
             .map(|i| {
                 let idx = list_start + i;
@@ -779,8 +783,15 @@ fn render_body(view: &RnView, cols: usize, h: usize, d: Option<&Device>) -> Vec<
                 }
                 spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
                 let abs = d_start + i;
+                let dstyle = if abs == dcursor {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else if in_range(prev_vis, abs) {
+                    sel_style()
+                } else {
+                    Style::default()
+                };
                 let dline = dl.get(abs).cloned().unwrap_or_default();
-                let dl_line = row_line(&dline, right_w, Style::default(), &view.search, Some(abs) == view.detail_hit);
+                let dl_line = row_line(&dline, right_w, dstyle, &view.search, Some(abs) == view.detail_hit);
                 spans.extend(dl_line.spans);
                 Line::from(spans)
             })
@@ -831,9 +842,9 @@ fn footer(view: &RnView, is_logs: bool) -> String {
                 let nn = if view.search.is_empty() { "" } else { " · n/N" };
                 let z = if view.maximized { "z split" } else { "z max" };
                 let copy = if is_logs { "" } else { " · c curl" };
-                let vis = if view.maximized { " · V select" } else { "" };
-                let open = if view.maximized { " · o nvim" } else { "" };
-                return format!(" ⏎ close · {z} · jk {} · JK scroll · / search{nn}{vis} · y copy{copy}{open} · q quit", if view.maximized { "move" } else { "list" });
+                // side-by-side: jk moves the list, JK the panel; maximized: both move the panel.
+                let nav = if view.maximized { "jk/JK move" } else { "jk list · JK move" };
+                return format!(" ⏎ close · {z} · {nav} · / search{nn} · V select · y copy{copy} · o nvim · q quit");
             }
             let nn = if view.search.is_empty() { "" } else { " · n/N" };
             let scroll = if view.follow { "on" } else { "off" };
@@ -947,6 +958,16 @@ fn keep_cursor_visible(view: &mut RnView) {
     }
 }
 
+/// Reset the preview cursor/scroll to the top — call when the side-by-side list
+/// selection changes so the panel starts fresh on the new entry.
+fn reset_detail_cursor(view: &mut RnView) {
+    if view.detail {
+        view.detail_cursor = 0;
+        view.detail_scroll = 0;
+        view.detail_hit = None;
+    }
+}
+
 /// Yank the current visual selection (preview lines when maximized, else list
 /// rows). Returns false if there was no active selection.
 fn yank_visual(view: &mut RnView) -> bool {
@@ -954,7 +975,7 @@ fn yank_visual(view: &mut RnView) -> bool {
         Some(a) => a,
         None => return false,
     };
-    let text = if view.maximized {
+    let text = if view.detail {
         let lines = view.detail_wrapped();
         let cursor = view.detail_cursor.min(lines.len().saturating_sub(1));
         let (lo, hi) = (anchor.min(cursor), anchor.max(cursor));
@@ -1263,11 +1284,11 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
         }
         KeyCode::Char('p') => view.clear_on_restart = !view.clear_on_restart,
         // Open the stack frame under the cursor in the already-running nvim.
-        KeyCode::Char('o') if view.detail && view.maximized => open_at_cursor(view),
+        KeyCode::Char('o') if view.detail => open_at_cursor(view),
         KeyCode::Char('V') => {
             if view.visual.is_some() {
                 view.visual = None;
-            } else if view.maximized {
+            } else if view.detail {
                 view.visual = Some(view.detail_cursor);
             } else {
                 view.follow = false;
@@ -1313,17 +1334,21 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             } else if n > 0 {
                 view.detail = true;
                 view.detail_scroll = 0;
+                view.detail_cursor = 0;
             }
         }
         KeyCode::Char('J') => {
             if view.detail {
-                view.detail_scroll += 1;
+                let last = view.detail_wrapped().len().saturating_sub(1);
+                view.detail_cursor = (view.detail_cursor + 1).min(last);
+                keep_cursor_visible(view);
                 view.detail_hit = None;
             }
         }
         KeyCode::Char('K') => {
             if view.detail {
-                view.detail_scroll = view.detail_scroll.saturating_sub(1);
+                view.detail_cursor = view.detail_cursor.saturating_sub(1);
+                keep_cursor_visible(view);
                 view.detail_hit = None;
             }
         }
@@ -1353,6 +1378,7 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
                 let cur = if view.follow { n.saturating_sub(1) } else { view.sel[ti] };
                 view.follow = false;
                 view.sel[ti] = cur.saturating_sub(1);
+                reset_detail_cursor(view); // new entry previewed → panel back to top
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
@@ -1366,6 +1392,7 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
                 let next = (cur + 1).min(n.saturating_sub(1));
                 view.follow = next >= n.saturating_sub(1);
                 view.sel[ti] = next;
+                reset_detail_cursor(view);
             }
         }
         KeyCode::PageUp => {
@@ -1380,7 +1407,7 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             view.sel[ti] = next;
         }
         KeyCode::Char('g') => {
-            if view.detail && view.maximized {
+            if view.detail {
                 view.detail_cursor = 0;
                 keep_cursor_visible(view);
             } else {
@@ -1390,7 +1417,7 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             }
         }
         KeyCode::Char('G') => {
-            if view.detail && view.maximized {
+            if view.detail {
                 view.detail_cursor = view.detail_wrapped().len().saturating_sub(1);
                 keep_cursor_visible(view);
             } else {
