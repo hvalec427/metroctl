@@ -31,6 +31,14 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
+# The channel `metroctl update` follows from now on, recorded below.
+case "$VERSION" in
+  dev) CHANNEL="dev" ;;
+  *-dev.*) CHANNEL="dev" ;;
+  *-nightly.*) CHANNEL="nightly" ;;
+  *) CHANNEL="stable" ;;
+esac
+
 # Install over the metroctl already on PATH if there is one, so we never leave a
 # stale copy shadowing the new version; otherwise default to /usr/local/bin.
 EXISTING=$(command -v metroctl 2>/dev/null || true)
@@ -57,7 +65,12 @@ else
   sudo mv /tmp/metroctl "$INSTALL_PATH"
 fi
 
-echo "Done — metroctl $VERSION installed to $INSTALL_PATH"
+# Remember the channel so a plain `metroctl update` stays on it.
+CONFIG_DIR="$HOME/.config/metroctl"
+mkdir -p "$CONFIG_DIR"
+printf '{\n  "channel": "%s"\n}\n' "$CHANNEL" > "$CONFIG_DIR/update.json"
+
+echo "Done — metroctl $VERSION ($CHANNEL channel) installed to $INSTALL_PATH"
 
 # Warn if some other metroctl earlier in PATH would still win.
 RESOLVED=$(command -v metroctl 2>/dev/null || true)
