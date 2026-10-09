@@ -334,7 +334,7 @@ pub fn current_project(cfg: &RnConfig) -> Option<ProjectConfig> {
 
 /// (main checkout, this worktree) top-level dirs, when `dir` is inside a
 /// linked git worktree.
-fn git_worktree_roots(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+pub fn git_worktree_roots(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)

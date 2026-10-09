@@ -207,6 +207,10 @@ metroctl down                         # from another shell: stop it, delete its 
   `--sim-type "iPhone 16 Pro"` / `--sim-runtime 18.2`. On quit, metroctl asks
   whether to delete it (`--sim-cleanup ask|delete|keep`).
 - `--install` installs JS deps and pods first.
+- `--prebuilt` skips the native build: it installs the app the main checkout
+  last built (newest matching bundle id in Xcode's DerivedData) and points it at
+  this session's Metro, so a new worktree is running in seconds. Use `rebuild`
+  (or `b`) after native changes. Falls back to building when there's no build.
 - Steps run in order: install and simulator boot run in parallel, then Metro
   starts, then the build runs once Metro answers. Each step gets its own
   process tab.

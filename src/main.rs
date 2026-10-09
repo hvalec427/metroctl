@@ -58,6 +58,10 @@ enum Command {
         /// Install JS deps and pods before starting Metro
         #[arg(long)]
         install: bool,
+        /// Install the app the main checkout already built (from Xcode's DerivedData) instead of
+        /// building; JS still comes from this checkout's Metro. Falls back to building.
+        #[arg(long)]
+        prebuilt: bool,
     },
     /// Clean up after metroctl sessions that died (simulators, app port settings)
     Gc {
@@ -124,7 +128,7 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         None => commands_rn::launch(session::UpOpts::default()),
-        Some(Command::Up { port, device, new_sim, sim_type, sim_runtime, sim_cleanup, install }) => {
+        Some(Command::Up { port, device, new_sim, sim_type, sim_runtime, sim_cleanup, install, prebuilt }) => {
             let port = match port.as_deref() {
                 None => None,
                 Some("auto") => Some(None),
@@ -137,7 +141,7 @@ fn main() {
                 },
             };
             let new_sim = new_sim.map(|n| Some(n).filter(|n| !n.is_empty()));
-            commands_rn::launch(session::UpOpts { port, device, new_sim, sim_type, sim_runtime, sim_cleanup: Some(sim_cleanup), install })
+            commands_rn::launch(session::UpOpts { port, device, new_sim, sim_type, sim_runtime, sim_cleanup: Some(sim_cleanup), install, prebuilt })
         }
         Some(Command::Down { keep_sim }) => commands_rn::down(keep_sim),
         Some(Command::Gc { sims }) => {

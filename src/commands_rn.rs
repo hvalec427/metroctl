@@ -67,7 +67,20 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
         })
     };
     let up = opts.port.is_some() || pinned.is_some() || opts.install;
-    Ok(Setup { pinned, install: opts.install, start: up })
+    // --prebuilt: the main checkout's last simulator build, when there is one.
+    let prebuilt = match (&pinned, opts.prebuilt, project.ios_bundle_id()) {
+        (Some(p), true, Some(bundle)) if p.simulator => {
+            let main = crate::rnconfig::git_worktree_roots(std::path::Path::new(&project.root)).map(|(m, _)| m);
+            let app = session::find_prebuilt_app(bundle, main.as_deref().or(Some(std::path::Path::new(&project.root))));
+            match &app {
+                Some(a) => eprintln!("using prebuilt {}", a.display()),
+                None => eprintln!("no prebuilt app for {bundle} in DerivedData; building instead"),
+            }
+            app
+        }
+        _ => None,
+    };
+    Ok(Setup { pinned, install: opts.install, start: up, prebuilt })
 }
 
 /// `metroctl down` — stop the session running in this checkout.

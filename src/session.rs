@@ -31,6 +31,8 @@ pub struct UpOpts {
     pub sim_runtime: Option<String>,
     pub sim_cleanup: Option<SimCleanup>,
     pub install: bool,
+    /// Install the app the main checkout already built instead of building.
+    pub prebuilt: bool,
 }
 
 /// The device a session is pinned to.
@@ -376,6 +378,43 @@ pub fn android_point_app_at_port(serial: &str, package: Option<&str>, port: u16)
 
 pub fn android_release(serial: &str) {
     let _ = Command::new("adb").args(["-s", serial, "reverse", "--remove", "tcp:8081"]).output();
+}
+
+/// The newest simulator build of `bundle` in Xcode's DerivedData, preferring
+/// builds of a workspace under `prefer_root` (the main checkout).
+pub fn find_prebuilt_app(bundle: &str, prefer_root: Option<&Path>) -> Option<PathBuf> {
+    let dd = PathBuf::from(std::env::var("HOME").ok()?).join("Library/Developer/Xcode/DerivedData");
+    let plist = |p: &Path, key: &str| -> Option<String> {
+        let out = Command::new("plutil").args(["-extract", key, "raw", "-o", "-"]).arg(p).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let mut found: Vec<(bool, std::time::SystemTime, PathBuf)> = Vec::new();
+    for d in std::fs::read_dir(&dd).ok()?.flatten() {
+        let ours = prefer_root.is_some_and(|root| plist(&d.path().join("info.plist"), "WorkspacePath").is_some_and(|w| Path::new(&w).starts_with(root)));
+        let Ok(products) = std::fs::read_dir(d.path().join("Build/Products")) else { continue };
+        for conf in products.flatten().filter(|c| c.file_name().to_string_lossy().ends_with("-iphonesimulator")) {
+            for app in std::fs::read_dir(conf.path()).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "app")) {
+                if plist(&app.join("Info.plist"), "CFBundleIdentifier").as_deref() == Some(bundle) {
+                    let t = std::fs::metadata(&app).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                    found.push((ours, t, app));
+                }
+            }
+        }
+    }
+    found.into_iter().max_by_key(|(ours, t, _)| (*ours, *t)).map(|(_, _, p)| p)
+}
+
+/// Shell command that installs a prebuilt app on a simulator, points it at
+/// `port` and launches it (in the background: `simctl launch` can hang on a
+/// freshly created simulator).
+pub fn install_prebuilt_command(udid: &str, app: &Path, bundle: &str, port: u16) -> String {
+    let app = format!("'{}'", app.display().to_string().replace('\'', "'\\''"));
+    format!(
+        "echo 'installing the main checkout build ({app}); JS comes from this worktree. Rebuild after native changes.'; \
+         xcrun simctl install {udid} {app} && \
+         xcrun simctl spawn {udid} defaults write {bundle} RCT_jsLocation localhost:{port} && \
+         (xcrun simctl launch {udid} {bundle} &) ; sleep 5; echo 'info Launching {bundle}'"
+    )
 }
 
 /// Shell command that boots a simulator, shows it, and waits until it's ready.

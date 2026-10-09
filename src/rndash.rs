@@ -147,6 +147,7 @@ pub struct Setup {
     pub pinned: Option<Pinned>,
     pub install: bool,
     pub start: bool, // start Metro and build onto the pinned device
+    pub prebuilt: Option<PathBuf>, // install this .app instead of building
 }
 
 /// Process tabs of the setup steps; `None` = step not needed.
@@ -155,6 +156,7 @@ struct SetupRun {
     boot: Option<usize>,
     build: Option<usize>,
     metro_started: bool,
+    prebuilt: Option<PathBuf>,
 }
 
 pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
@@ -404,7 +406,7 @@ impl DashApp {
         if setup.install && install.is_none() {
             return self.set_status("install_failed");
         }
-        self.setup = Some(SetupRun { install, boot, build: None, metro_started: false });
+        self.setup = Some(SetupRun { install, boot, build: None, metro_started: false, prebuilt: setup.prebuilt.clone() });
         self.advance_setup();
     }
 
@@ -475,7 +477,16 @@ impl DashApp {
             };
             let before = self.procs.len();
             let android = self.pinned.as_ref().is_some_and(|p| p.android);
-            self.run_platform(android, Some(udid));
+            let prebuilt = self.setup.as_ref().and_then(|s| s.prebuilt.clone());
+            match (prebuilt, self.project.ios_bundle_id().map(String::from)) {
+                (Some(app), Some(bundle)) if !android => {
+                    let cmd = session::install_prebuilt_command(&udid, &app, &bundle, self.project.metro_port());
+                    if let Some(i) = self.spawn_proc("Install app", &cmd) {
+                        self.proc_sel = i;
+                    }
+                }
+                _ => self.run_platform(android, Some(udid)),
+            }
             if self.procs.len() == before {
                 return fail(self, "build_failed", "couldn't start the build");
             }
@@ -575,7 +586,7 @@ impl DashApp {
                     return json!({ "error": self.flash.as_ref().map(|f| f.0.clone()) });
                 }
                 // Track it like the setup build, so the session status follows it.
-                self.setup = Some(SetupRun { install: None, boot: None, build: Some(before), metro_started: true });
+                self.setup = Some(SetupRun { install: None, boot: None, build: Some(before), metro_started: true, prebuilt: None });
                 self.set_status("building");
                 json!({ "ok": true, "process": self.procs[before].label })
             }
