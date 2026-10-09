@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO="hvalec427/metroctl"
 
-LATEST=$(git tag -l 'v*' | grep -v -e '-' | sort -V | tail -1 | sed 's/^v//')
+LATEST=$(git tag -l 'v*' | { grep -v -e '-' || true; } | sort -V | tail -1 | sed 's/^v//')
 if [ -n "${LATEST:-}" ]; then
   if [ "$(git rev-list -n1 "v${LATEST}")" = "$(git rev-parse HEAD)" ]; then
     echo "HEAD is already released as v${LATEST} — skipping."
