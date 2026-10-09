@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Cut a stable release from the pushed master commit, one patch above the
-# latest stable (e.g. v0.1.2 → v0.1.3). Skips if this commit is already released.
+# Cut a stable release from the pushed master commit, versioned from the
+# conventional commits since the last one (scripts/next-version.sh). Skips if
+# this commit is already released.
 set -euo pipefail
 
 REPO="hvalec427/metroctl"
