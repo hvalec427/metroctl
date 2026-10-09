@@ -48,7 +48,21 @@ pub fn load_channel() -> Channel {
     match v.get("channel").and_then(|c| c.as_str()) {
         Some("nightly") => Channel::Nightly,
         Some("dev") => Channel::Dev,
-        _ => Channel::Stable,
+        Some("stable") => Channel::Stable,
+        // Nothing saved (e.g. installed via install.sh): follow the channel the
+        // running build came from, so a dev build doesn't fall back to stable.
+        _ => channel_of(&current_version()),
+    }
+}
+
+/// The channel a version string belongs to.
+pub fn channel_of(version: &str) -> Channel {
+    if version.contains("-dev.") {
+        Channel::Dev
+    } else if version.contains("-nightly.") {
+        Channel::Nightly
+    } else {
+        Channel::Stable
     }
 }
 
@@ -145,7 +159,7 @@ pub fn changelog_since(channel: Channel, current: &str) -> Option<String> {
     let releases: Vec<Release> = r.json().ok()?;
     let mut in_channel: Vec<Release> = releases
         .into_iter()
-        .filter(|r| if channel == Channel::Stable { !r.prerelease } else { r.prerelease })
+        .filter(|r| if channel == Channel::Stable { !r.prerelease } else { r.prerelease && strip_v(&r.tag_name).contains("-nightly.") })
         .collect();
     in_channel.sort_by(|a, b| compare_versions(&strip_v(&b.tag_name), &strip_v(&a.tag_name)));
     if in_channel.is_empty() {
@@ -189,7 +203,15 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
         let z = nums.next().unwrap_or(0);
         let pre_num = match pre {
             None => u64::MAX,
-            Some(p) => p.rsplit_once('.').and_then(|(_, n)| n.parse::<u64>().ok()).unwrap_or(0),
+            Some(p) => p
+                .rsplit_once('.')
+                .and_then(|(_, n)| {
+                    // Older builds used YYYYMMDDHHMMSS; scale a YYYYMMDD date to
+                    // match so the two orders by day.
+                    let v = n.parse::<u64>().ok()?;
+                    Some(if n.len() == 8 { v * 1_000_000 } else { v })
+                })
+                .unwrap_or(0),
         };
         [x, y, z, pre_num]
     }
@@ -365,6 +387,10 @@ pub fn check_update(stable: bool, nightly: bool, dev: bool) {
         Ordering::Equal => println!("\nYou're up to date."),
         Ordering::Less => {
             println!("\nThe latest {} build ({}) is older than your installed version.", channel.as_str(), latest.version);
+            if stable || nightly || dev {
+                let flag = if dev { " --dev" } else if nightly { " --nightly" } else { " --stable" };
+                println!("Run `metroctl update{flag}` to switch to the {} channel (installs {}).", channel.as_str(), latest.version);
+            }
         }
         Ordering::Greater => {
             if let Some(notes) = changelog_since(channel, &current) {
@@ -373,5 +399,27 @@ pub fn check_update(stable: bool, nightly: bool, dev: bool) {
             let flag = if dev { " --dev" } else if nightly { " --nightly" } else if stable { " --stable" } else { "" };
             println!("\nRun `metroctl update{flag}` to install.");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering::*;
+
+    #[test]
+    fn compares_versions() {
+        assert_eq!(compare_versions("1.3.0-dev.20261009120000", "1.2.0-dev.20261009130000"), Greater);
+        assert_eq!(compare_versions("1.2.0", "1.2.0-nightly.20261009"), Greater);
+        assert_eq!(compare_versions("2.16.0-nightly.20261009", "2.16.0-nightly.20261006193436"), Greater);
+        assert_eq!(compare_versions("2.16.0-nightly.20261006", "2.16.0-nightly.20261006193436"), Less);
+        assert_eq!(compare_versions("1.2.0-dev.20261009120000", "1.2.0-dev.20261009120000"), Equal);
+    }
+
+    #[test]
+    fn infers_channel_from_version() {
+        assert_eq!(channel_of("1.2.0-dev.20261009120000"), Channel::Dev);
+        assert_eq!(channel_of("1.2.0-nightly.20261009"), Channel::Nightly);
+        assert_eq!(channel_of("1.2.0"), Channel::Stable);
     }
 }
