@@ -55,12 +55,9 @@ pub struct SessionFile {
     #[serde(default)]
     pub created_sim: bool,
     pub status: String,
-    /// ios_simulator | ios_device | android (picks the UI-control backend).
+    /// ios_simulator | ios_device | android.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
-    /// WebDriverAgent port, once started for UI control.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wda_port: Option<u16>,
     /// iOS bundle id of the app (to release it on `down`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
@@ -214,16 +211,9 @@ pub fn gc(sims: bool) -> Result<()> {
     Ok(())
 }
 
-/// A port for WebDriverAgent: from 8100, skipping other sessions' and
-/// anything listening.
-pub fn free_wda_port() -> Result<u16> {
-    let claimed: Vec<u16> = live_sessions().iter().flat_map(|s| [Some(s.port), s.wda_port]).flatten().collect();
-    (8100..8200).find(|p| !claimed.contains(p) && !crate::metro_events::port_in_use(*p)).ok_or_else(|| anyhow!("no free port in 8100–8199"))
-}
-
 /// First port from `start` that's neither listening nor claimed by a session.
 pub fn free_port(start: u16) -> Result<u16> {
-    let claimed: Vec<u16> = live_sessions().iter().flat_map(|s| [Some(s.port), s.wda_port]).flatten().collect();
+    let claimed: Vec<u16> = live_sessions().iter().map(|s| s.port).collect();
     (start..start.saturating_add(100))
         .find(|p| !claimed.contains(p) && !crate::metro_events::port_in_use(*p))
         .ok_or_else(|| anyhow!("no free port in {start}–{}", start.saturating_add(99)))
@@ -341,11 +331,26 @@ pub fn point_app_at_port(udid: &str, bundle: &str, port: u16) -> Result<bool> {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
     let _ = Command::new("xcrun").args(["simctl", "terminate", udid, bundle]).output();
-    let out = Command::new("xcrun").args(["simctl", "launch", udid, bundle]).output()?;
-    if !out.status.success() {
-        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    // `simctl launch` can hang on a freshly created simulator; don't hang with it.
+    let mut child = Command::new("xcrun").args(["simctl", "launch", udid, bundle]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn()?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                let mut err = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = std::io::Read::read_to_string(&mut e, &mut err);
+                }
+                bail!("{}", err.trim());
+            }
+            return Ok(true);
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            let _ = child.kill();
+            bail!("simctl launch didn't return within 30s");
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
-    Ok(true)
 }
 
 /// adb serials of connected, ready Android devices and emulators.

@@ -136,7 +136,6 @@ pub struct DashApp {
     term: Arc<AtomicBool>,      // SIGTERM/SIGHUP received (e.g. `metroctl down`)
     delete_sim_on_quit: bool,
     sim_builds: Vec<(usize, String, bool)>, // build tabs → (device, android?), to point the app at our port
-    wda: Option<(usize, u16)>,              // WebDriverAgent tab and port (UI control on iOS)
     ctl_rx: Receiver<control::Request>,
     socket: Option<PathBuf>, // control socket, when it could be bound
 }
@@ -376,7 +375,6 @@ impl DashApp {
             term: Arc::new(AtomicBool::new(false)),
             delete_sim_on_quit: false,
             sim_builds: Vec::new(),
-            wda: None,
             ctl_rx,
             socket,
         }
@@ -401,6 +399,19 @@ impl DashApp {
         }
         self.setup = Some(SetupRun { install, boot, build: None, metro_started: false });
         self.advance_setup();
+    }
+
+    /// Has this build installed the app? `run-ios` can hang in its final
+    /// `simctl launch` (seen on freshly created simulators) after installing,
+    /// so its exit can't be the only signal.
+    fn build_installed(&self, idx: usize) -> Option<bool> {
+        let p = self.procs.get(idx)?;
+        if let Some(code) = p.exit_code() {
+            return Some(code == 0);
+        }
+        let tail = p.tail_text(40);
+        let launched = tail.iter().any(|l| l.starts_with("info Launching") || l.contains("Starting: Intent") || l.starts_with("info Starting the app"));
+        launched.then_some(true)
     }
 
     /// `Some(true)` = finished OK (or not needed), `Some(false)` = failed, `None` = running.
@@ -466,7 +477,7 @@ impl DashApp {
             }
             return self.set_status("building");
         };
-        match self.step_result(Some(build)) {
+        match self.build_installed(build) {
             None => {}
             Some(true) => {
                 self.setup = None;
@@ -554,40 +565,8 @@ impl DashApp {
                 self.set_status("building");
                 json!({ "ok": true, "process": self.procs[before].label })
             }
-            "ui_start" => self.start_wda(),
-            _ => json!({ "error": format!("unknown command {cmd:?}"), "commands": ["ui_start", "status", "logs", "errors", "network", "request", "output", "reload", "rebuild", "restart_metro"] }),
+            _ => json!({ "error": format!("unknown command {cmd:?}"), "commands": ["status", "logs", "errors", "network", "request", "output", "reload", "rebuild", "restart_metro"] }),
         }
-    }
-
-    /// Start WebDriverAgent on the session's iOS simulator (once), for the
-    /// agent UI tools. Returns its port; the tab shows the build/run output.
-    fn start_wda(&mut self) -> Value {
-        let Some(p) = self.pinned.clone() else {
-            return json!({ "error": "this session isn't pinned to a device" });
-        };
-        if p.android {
-            return json!({ "error": "Android uses adb, no WebDriverAgent needed" });
-        }
-        if !p.simulator {
-            return json!({ "error": "UI control on physical iPhones isn't supported yet (WebDriverAgent needs code signing there)" });
-        }
-        if let Some((i, port)) = self.wda {
-            if self.procs.get(i).is_some_and(|w| w.is_alive()) {
-                return json!({ "ok": true, "port": port });
-            }
-        }
-        // Ports from 8100, skipping other sessions' WebDriverAgents and anything listening.
-        let port = match session::free_wda_port() {
-            Ok(p) => p,
-            Err(e) => return json!({ "error": format!("{e:#}") }),
-        };
-        let cmd = crate::ui::wda_command(&p.udid, port);
-        let Some(i) = self.spawn_proc("WebDriverAgent", &cmd) else {
-            return json!({ "error": self.flash.as_ref().map(|f| f.0.clone()) });
-        };
-        self.wda = Some((i, port));
-        self.write_session();
-        json!({ "ok": true, "port": port, "starting": true })
     }
 
     fn is_simulator(&self, udid: &str) -> bool {
@@ -603,7 +582,7 @@ impl DashApp {
         let done: Vec<(usize, String, bool, bool)> = self
             .sim_builds
             .iter()
-            .filter_map(|(i, u, a)| self.procs.get(*i).and_then(|p| p.exit_code()).map(|c| (*i, u.clone(), *a, c == 0)))
+            .filter_map(|(i, u, a)| self.build_installed(*i).map(|ok| (*i, u.clone(), *a, ok)))
             .collect();
         if done.is_empty() {
             return;
@@ -656,7 +635,6 @@ impl DashApp {
                 status: self.status.clone(),
                 bundle: self.project.ios_bundle_id().map(String::from),
                 platform: self.pinned.as_ref().map(|p| if p.android { "android" } else if p.simulator { "ios_simulator" } else { "ios_device" }.to_string()),
-                wda_port: self.wda.map(|w| w.1),
                 socket: self.socket.as_ref().map(|p| p.display().to_string()),
             },
         );
@@ -943,13 +921,6 @@ impl DashApp {
         self.advance_setup(); // settle setup steps before their tab indices shift
         self.finish_sim_builds();
         let label = self.procs.remove(i).label.clone();
-        if let Some((w, _)) = self.wda.as_mut() {
-            if *w == i {
-                self.wda = None;
-            } else if *w > i {
-                *w -= 1;
-            }
-        }
         self.sim_builds.retain_mut(|(b, _, _)| {
             if *b > i {
                 *b -= 1;

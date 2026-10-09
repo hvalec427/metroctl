@@ -236,12 +236,10 @@ server on top of it for coding agents:
 | `logs`, `errors`, `network`, `request` | JS console, failures, requests (`since` for only new entries) |
 | `output` | last lines of a process tab (build errors) |
 | `reload`, `rebuild`, `restart_metro` | drive the session |
-| `screenshot`, `open_url` | see the screen, open deep links |
-| `ui`, `tap`, `swipe`, `type_text`, `press` | use the app: element tree with testIDs, tap by testID or label |
 
-UI control uses WebDriverAgent on iOS simulators (cloned and built into
-`~/.cache/metroctl` on first use, then run in a tab; `METROCTL_WDA_TAG`
-picks the release) and adb on Android. Physical iPhones aren't supported yet.
+To see and use the app's screen (screenshots, element tree, taps, typing,
+deep links), use [touchctl](https://github.com/hvalec427/touchctl). Point it at
+the session's device with `touchctl --device-from .metroctl/session.json …`.
 
 ## Contributing
 

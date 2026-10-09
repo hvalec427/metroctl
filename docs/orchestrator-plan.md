@@ -148,8 +148,11 @@ Plain `metroctl` with no flags behaves exactly as it does today.
 
 ## Next: agents control simulators and devices
 
-Add UI control to `metroctl mcp`, so an agent can drive the app it's working
-on, not just look at it. No Maestro.
+Moved out of metroctl into its own tool, [touchctl](https://github.com/hvalec427/touchctl)
+(CLI, used by agents through Bash; no MCP server). The original design notes:
+
+UI control so an agent can drive the app it's working on, not just look at
+it. No Maestro.
 
 | Target | Screen | Element tree (ids, text, bounds) | Tap / swipe / type |
 |---|---|---|---|
