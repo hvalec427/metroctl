@@ -2,13 +2,15 @@ name: Build & Release
 
 on:
   push:
-    tags:
-      - "v*" # stable release at that version
     branches:
-      - develop # rolling "dev" build on every commit
+      - main    # stable
+      - master  # stable
+      - develop # dev: rolling build on every commit
   schedule:
-    - cron: "0 23 * * *" # nightly prerelease from develop
-  workflow_dispatch: {} # manual nightly on demand
+    # Nightly from develop, 23:00 Ljubljana in summer (CEST), 22:00 in winter —
+    # GitHub cron is UTC-only.
+    - cron: "0 21 * * *"
+  workflow_dispatch: {} # nightly (also on demand)
 
 permissions:
   contents: write
@@ -18,7 +20,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Scheduled runs always use the workflow file on the default branch (main),
+  # which lags develop. This job only re-dispatches the workflow on develop, so
+  # the nightly build runs develop's own definition.
+  trigger-nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch nightly on develop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref develop
+
   release:
+    if: github.event_name != 'schedule'
     # macOS: binaries are built for both Apple targets and ad-hoc code-signed.
     runs-on: macos-latest
     steps:
@@ -26,7 +43,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Scheduled / manual runs build the nightly from develop.
+      # Manual runs may be started on any branch; nightlies always build develop.
       - name: Build from develop (nightly)
         if: github.event_name != 'push'
         run: |
@@ -39,18 +56,12 @@ jobs:
       - name: Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      # Tag push → stable release at that version.
+      # main/master push → stable release, next patch above the latest stable.
       - name: Stable release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          bash scripts/build-binaries.sh "$VERSION"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes "metroctl $VERSION" \
-            metroctl-darwin-arm64 metroctl-darwin-x64
+        run: bash scripts/stable-release.sh
 
       # develop push → rolling "dev" prerelease.
       - name: Dev build
@@ -59,7 +70,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/dev-release.sh
 
-      # schedule / manual → date-stamped nightly prerelease from develop.
+      # workflow_dispatch (from the schedule, or manual) → date-stamped nightly.
       - name: Nightly release
         if: github.event_name != 'push'
         env:
