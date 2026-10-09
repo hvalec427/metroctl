@@ -200,7 +200,7 @@ pub fn gc(sims: bool) -> Result<()> {
         let v = simctl_json(&["list", "devices"])?;
         for d in v["devices"].as_object().into_iter().flat_map(|o| o.values()).flat_map(|l| l.as_array().into_iter().flatten()) {
             let (name, udid) = (d["name"].as_str().unwrap_or(""), d["udid"].as_str().unwrap_or(""));
-            if name.starts_with("metroctl-") && !owned.iter().any(|o| o == udid) {
+            if name.starts_with("metroctl-") && !name.starts_with(TEMPLATE_PREFIX) && !owned.iter().any(|o| o == udid) {
                 delete_simulator(udid)?;
                 println!("deleted orphaned simulator {name} ({udid})");
                 n += 1;
@@ -299,14 +299,104 @@ fn pick_sim(runtimes: &Value, runtime: Option<&str>, device: Option<&str>) -> Re
 }
 
 /// Create a simulator; returns (udid, "iPhone 17 · iOS 26.0").
+/// Name prefix of the settled simulators new ones are cloned from.
+const TEMPLATE_PREFIX: &str = "metroctl-template";
+
+fn simctl_out(args: &[&str]) -> Result<String> {
+    let out = Command::new("xcrun").arg("simctl").args(args).output()?;
+    if !out.status.success() {
+        bail!("simctl {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// udid of the simulator called `name`, if any.
+fn sim_named(name: &str) -> Option<String> {
+    let v = simctl_json(&["list", "devices"]).ok()?;
+    v["devices"].as_object()?.values().flat_map(|l| l.as_array().into_iter().flatten()).find(|d| d["name"] == name).and_then(|d| d["udid"].as_str().map(String::from))
+}
+
+/// Run `simctl launch` with a time limit (it hangs while a fresh simulator is
+/// still setting itself up). Whether it launched in time.
+fn launch_within(udid: &str, bundle: &str, secs: u64) -> bool {
+    let Ok(mut child) = Command::new("xcrun").args(["simctl", "launch", udid, bundle]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() else {
+        return false;
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(s)) => return s.success(),
+            Ok(None) if start.elapsed() < Duration::from_secs(secs) => std::thread::sleep(Duration::from_millis(300)),
+            _ => {
+                let _ = child.kill();
+                return false;
+            }
+        }
+    }
+}
+
+/// The settled template for a device type + runtime, creating it the first
+/// time: a newly created simulator says it's booted long before it can launch
+/// apps (first boot sets up its data, minutes on recent iOS). The template
+/// goes through that once; clones of it start ready.
+fn template(ty: &str, rt: &str, desc: &str) -> Result<String> {
+    let name = format!("{TEMPLATE_PREFIX} {desc}");
+    // One builder at a time (parallel `up`s).
+    let lock = crate::rnconfig::rn_config_path().with_file_name("template.lock");
+    let start = Instant::now();
+    while std::fs::create_dir(&lock).is_err() {
+        let stale = std::fs::metadata(&lock).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > Duration::from_secs(30 * 60));
+        if stale || start.elapsed() > Duration::from_secs(30 * 60) {
+            let _ = std::fs::remove_dir(&lock);
+        } else {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    struct Unlock(PathBuf);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+    let _unlock = Unlock(lock);
+    if let Some(udid) = sim_named(&name) {
+        return Ok(udid);
+    }
+    eprintln!("creating the simulator template \"{name}\" (once per device type and iOS version; a few minutes)…");
+    let udid = simctl_out(&["create", &format!("{name} (setting up)"), ty, rt])?;
+    let settle = || -> Result<()> {
+        let _ = simctl_out(&["boot", &udid]);
+        simctl_out(&["bootstatus", &udid, "-b"])?;
+        eprintln!("booted; waiting until it can launch apps…");
+        let t = Instant::now();
+        while !launch_within(&udid, "com.apple.Preferences", 60) {
+            if t.elapsed() > Duration::from_secs(30 * 60) {
+                bail!("the template simulator never became ready to launch apps");
+            }
+            eprintln!("  still setting up ({}s)…", t.elapsed().as_secs());
+        }
+        let _ = simctl_out(&["terminate", &udid, "com.apple.Preferences"]);
+        simctl_out(&["shutdown", &udid])?;
+        simctl_out(&["rename", &udid, &name])?;
+        Ok(())
+    };
+    if let Err(e) = settle() {
+        let _ = delete_simulator(&udid);
+        return Err(e);
+    }
+    eprintln!("template ready after {}s", start.elapsed().as_secs());
+    Ok(udid)
+}
+
+/// Create a simulator by cloning the settled template for the chosen device
+/// type and runtime (see `template`). Returns (udid, "iPhone 17 · iOS 26.0").
 pub fn create_simulator(name: &str, runtime: Option<&str>, device: Option<&str>) -> Result<(String, String)> {
     let runtimes = simctl_json(&["list", "runtimes"])?;
     let (ty, rt, desc) = pick_sim(&runtimes, runtime, device)?;
-    let out = Command::new("xcrun").args(["simctl", "create", name, &ty, &rt]).output()?;
-    if !out.status.success() {
-        bail!("simctl create: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok((String::from_utf8_lossy(&out.stdout).trim().to_string(), desc))
+    let tpl = template(&ty, &rt, &desc)?;
+    let _ = simctl_out(&["shutdown", &tpl]); // clone needs it shut down
+    let udid = simctl_out(&["clone", &tpl, name])?;
+    Ok((udid, desc))
 }
 
 /// Shut down and delete a simulator.

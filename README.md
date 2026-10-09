@@ -203,7 +203,9 @@ metroctl down                         # from another shell: stop it, delete its 
   ports other sessions have claimed. The port reaches the build through
   `RCT_METRO_PORT`, so each app talks to its own Metro.
 - `--new-sim [NAME]` creates a simulator (default `metroctl-<dir>`) using the
-  newest iOS runtime and the newest plain iPhone. Override them with
+  newest iOS runtime and the newest plain iPhone. It's cloned from a settled
+  template (`metroctl-template …`, built once per device type and iOS version),
+  because a freshly created simulator takes minutes before it can launch apps. Override them with
   `--sim-type "iPhone 16 Pro"` / `--sim-runtime 18.2`. On quit, metroctl asks
   whether to delete it (`--sim-cleanup ask|delete|keep`).
 - `--install` installs JS deps and pods first.
