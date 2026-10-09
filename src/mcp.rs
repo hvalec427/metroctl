@@ -174,7 +174,16 @@ fn rebuild(wait: bool) -> Result<Vec<Value>> {
 fn wait_ready(timeout_s: u64) -> Result<Vec<Value>> {
     let start = Instant::now();
     loop {
-        let s = ask("status", json!({}))?;
+        // The session appears only once metroctl has its simulator (creating
+        // the first clone template takes minutes): wait for it, too.
+        let s = match ask("status", json!({})) {
+            Ok(s) => s,
+            Err(_) if start.elapsed() < Duration::from_secs(timeout_s) => {
+                std::thread::sleep(Duration::from_secs(3));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let status = s["status"].as_str().unwrap_or("");
         let name = s["device_name"].as_str();
         let connected = s["apps"].as_array().into_iter().flatten().any(|a| a["status"] == "connected" && name.is_none_or(|n| a["device"].as_str().unwrap_or("").contains(n)));
