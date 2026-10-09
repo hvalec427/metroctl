@@ -91,9 +91,22 @@ Anything omitted is derived:
 feed to that port *and* exports it as `RCT_METRO_PORT` into every command it runs,
 so Metro and your builds use the same port. It defaults to `8081`.
 
-**Which device?** You don't pin a simulator/emulator in config — you pick one live
-from the dashboard's Devices pane (select + `b` to boot). `i` / `a` just run the
-build command against whatever's booted.
+**Which device?** Pick one live from the Devices pane (`j`/`k` to select) and press
+`⏎` to build & run on it. If it's a sim/emulator that isn't up yet, `⏎` boots it
+first — press `⏎` again once it shows `● running` (its id isn't known until then,
+and building early targets the wrong device). metroctl targets your pick with
+`--udid` (iOS) and `--deviceId` + the `ANDROID_SERIAL` env (Android).
+
+If your build script ends in a `-- …` passthrough, an appended `--udid`/`--deviceId`
+would land on the wrong side of the `--` and be ignored. Put a **`{udid}`** (iOS) /
+**`{serial}`** (Android) placeholder in `ios.command` / `android.command` instead, so
+it lands exactly where you want — metroctl substitutes the selected device:
+
+```json
+"ios": { "command": "npx react-native run-ios --udid {udid} --scheme 'MyApp' -- --reset-cache" }
+```
+
+Android rarely needs this — the `ANDROID_SERIAL` env pins the device regardless of `--`.
 
 ### Field reference
 
@@ -104,9 +117,9 @@ build command against whatever's booted.
 | `packageManager` | no | auto | `npm` \| `yarn` \| `pnpm`; detected from the lockfile when omitted. Drives the default commands. |
 | `metro.command` | no | `<pm> start` | Command to start Metro. |
 | `metro.port` | no | `8081` | Metro port. Used for the log feed **and** exported as `RCT_METRO_PORT` to every command — set it only here. |
-| `ios.command` | no | `<pm> run ios` / `<pm> ios` | Build & run command for iOS. |
+| `ios.command` | no | `<pm> run ios` / `<pm> ios` | Build & run command for iOS. May contain `{udid}`, replaced with the selected device (put it before any `-- …`). |
 | `ios.bundleId` | no | — | App bundle id; when set, `o` delivers the link straight to the app on a **physical** iPhone instead of Safari. |
-| `android.command` | no | `<pm> run android` / `<pm> android` | Build & run command for Android. |
+| `android.command` | no | `<pm> run android` / `<pm> android` | Build & run command for Android. May contain `{serial}`, replaced with the selected device (usually unnecessary — `ANDROID_SERIAL` already pins it). |
 | `android.bundleId` | no | — | Application id; when set, `o` routes the link to that package instead of a browser/chooser. |
 | `deeplinks` | no | `[]` | Links for the `l` quick-picker — each a URL string or `{ "name", "url" }`. |
 

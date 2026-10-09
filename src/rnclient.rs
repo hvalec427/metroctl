@@ -564,18 +564,11 @@ fn handle_network(
 
 /// Flatten a CDP stackTrace into `function (url:line)` strings.
 /// Keep only the last few path segments so frames read like `src/utils/log.ts`.
-fn shorten_path(p: &str) -> String {
-    let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.len() > 3 {
-        parts[parts.len() - 3..].join("/")
-    } else {
-        p.to_string()
-    }
-}
-
 fn frame_line(name: &str, file: &str, line: i64) -> String {
     let name = if name.is_empty() { "<anonymous>" } else { name };
-    format!("  at {name} ({}:{line})", shorten_path(file))
+    // Keep the FULL path so `o` (open in nvim) resolves it — a shortened display
+    // (last few segments) breaks files under node_modules/….
+    format!("  at {name} ({file}:{line})")
 }
 
 /// Turn a CDP stackTrace into readable lines. Tries Metro's `/symbolicate` to map
