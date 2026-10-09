@@ -19,21 +19,25 @@ else
 fi
 
 # Previous nightly = highest date suffix.
-PREV=$(git tag -l 'v*-nightly.*' | sort -t. -k4,4 -n | tail -1)
+TS=$(date -u +%Y%m%d)
+TAG="v${BASE}-nightly.${TS}"
+# Sort on the 8-digit date prefix first: older nightlies used 14-digit
+# timestamps, which would otherwise always sort above plain dates.
+PREV=$(git tag -l 'v*-nightly.*' | grep -vx -e "${TAG}" | sort -t. -k4.1,4.8n -k4,4n | tail -1)
 [ -z "${PREV}" ] && PREV="${LATEST:+v$LATEST}"
 
 # Skip when nothing that affects the binary changed since the last nightly.
-if [ -n "${PREV}" ] && git rev-parse "${PREV}" >/dev/null 2>&1; then
-  CODE_CHANGES=$(git diff --name-only "${PREV}" HEAD -- . ':(exclude)docs/**' ':(exclude)*.md' ':(exclude)LICENSE')
+SINCE="${PREV}"
+git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null && SINCE="${TAG}"
+if [ -n "${SINCE}" ] && git rev-parse "${SINCE}" >/dev/null 2>&1; then
+  CODE_CHANGES=$(git diff --name-only "${SINCE}" HEAD -- . ':(exclude)docs/**' ':(exclude)*.md' ':(exclude)LICENSE')
   if [ -z "${CODE_CHANGES}" ]; then
-    echo "No code changes since ${PREV} — skipping nightly."
+    echo "No code changes since ${SINCE} — skipping nightly."
     exit 0
   fi
 fi
 
-TS=$(date -u +%Y%m%d)
 VERSION="${BASE}-nightly.${TS}"
-TAG="v${VERSION}"
 
 echo "Building nightly ${TAG} (latest stable: ${LATEST:-none}, since ${PREV:-start})"
 bash scripts/build-binaries.sh "${VERSION}"
@@ -55,6 +59,11 @@ NOTES=$(mktemp)
   echo
   echo "_Apple Silicon shown; on Intel use \`metroctl-darwin-x64\`. Already installed? \`metroctl update --nightly\`._"
 } > "${NOTES}"
+
+# A nightly already cut today is replaced, so the day's last build wins.
+if gh release view "${TAG}" --repo "$REPO" >/dev/null 2>&1; then
+  gh release delete "${TAG}" --repo "$REPO" --cleanup-tag --yes
+fi
 
 # --target the built develop commit so the tag points at what we built.
 gh release create "${TAG}" \
