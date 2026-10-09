@@ -14,8 +14,10 @@ on:
 permissions:
   contents: write
 
+# One queue per ring (master / develop / nightly). GitHub keeps only one pending
+# run per group, so a shared group let a develop push cancel a queued nightly.
 concurrency:
-  group: release
+  group: release-${{ github.event_name == 'push' && github.ref_name || 'nightly' }}
   cancel-in-progress: false
 
 jobs:
