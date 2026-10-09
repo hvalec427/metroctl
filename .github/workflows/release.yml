@@ -3,7 +3,6 @@ name: Build & Release
 on:
   push:
     branches:
-      - main    # stable
       - master  # stable
       - develop # dev: rolling build on every commit
   schedule:
@@ -20,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Scheduled runs always use the workflow file on the default branch (main),
+  # Scheduled runs always use the workflow file on the default branch (master),
   # which lags develop. This job only re-dispatches the workflow on develop, so
   # the nightly build runs develop's own definition.
   trigger-nightly:
@@ -56,9 +55,9 @@ jobs:
       - name: Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      # main/master push → stable release, next patch above the latest stable.
+      # master push → stable release, next patch above the latest stable.
       - name: Stable release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/stable-release.sh

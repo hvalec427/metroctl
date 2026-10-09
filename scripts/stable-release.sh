@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cut a stable release from the pushed main/master commit, one patch above the
+# Cut a stable release from the pushed master commit, one patch above the
 # latest stable (e.g. v0.1.2 → v0.1.3). Skips if this commit is already released.
 set -euo pipefail
 

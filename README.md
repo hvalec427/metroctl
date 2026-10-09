@@ -16,13 +16,13 @@ metroctl logs     # just the React Native log viewer (see docs/logs.md)
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/master/install.sh | sh
 ```
 
 Grab the binary from the [latest release](https://github.com/hvalec427/metroctl/releases/latest), or the bleeding edge with `… | sh -s -- dev`. Re-run the installer to update. Uninstall:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/main/uninstall.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/master/uninstall.sh | sh
 ```
 
 Prefer source? `cargo install --git https://github.com/hvalec427/metroctl`.
