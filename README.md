@@ -125,7 +125,7 @@ Android rarely needs this — the `ANDROID_SERIAL` env pins the device regardles
 | `ios.bundleId` | no | — | App bundle id; when set, `o` delivers the link straight to the app on a **physical** iPhone instead of Safari. |
 | `android.command` | no | `<pm> run android` / `<pm> android` | Build & run command for Android. May contain `{serial}`, replaced with the selected device (usually unnecessary — `ANDROID_SERIAL` already pins it). |
 | `android.bundleId` | no | — | Application id; when set, `o` routes the link to that package instead of a browser/chooser. |
-| `deeplinks` | no | `[]` | Links for the `l` quick-picker — each a URL string or `{ "name", "url" }`. `<name>` / `{name}` placeholders (e.g. `laundryheap://?redirect=RC&uuid=<uuid>`) are asked for when you pick the link. |
+| `deeplinks` | no | `[]` | Links for the `l` quick-picker — each a URL string or `{ "name", "url" }`. `<name>` / `{name}` placeholders (e.g. `myapp://?redirect=RC&uuid=<uuid>`) are asked for when you pick the link. |
 
 Only `name` and `root` are mandatory — and `rn init` fills both in for you.
 

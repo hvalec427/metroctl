@@ -62,12 +62,12 @@ tmux session "orc"
    (`cp -c`, an APFS clone, so it's fast and takes no extra space). If the
    agent later changes dependencies, it runs `yarn install` / `pod install`
    again.
-   Also copy the git-ignored files the build needs. In laundryheap-mobile
+   Also copy the git-ignored files the build needs. In myapp
    that's `.env` and `ios/.xcode.env.local`. The list should be per-project
    config in orc (e.g. `copy: [".env", "ios/.xcode.env.local"]`). Then run
    `pod install`, which regenerates `ios/build` (React Native codegen) for
    the worktree's own branch. Copying `ios/build` instead works, but goes
-   stale if the branch changes native code. Measured on laundryheap-mobile:
+   stale if the branch changes native code. Measured on myapp:
    cloning `node_modules` 19s, `ios/Pods` 8s, then `pod install` 27s.
 4. **metroctl window:** `tmux new-window -d -n <slug> -c <worktree>
    'metroctl up --port auto --sim new'`. This picks a port, creates and boots
@@ -134,7 +134,7 @@ back from the processes.
 5. **Control socket:** a Unix socket at `.metroctl/control.sock` that speaks
    JSON lines. It serves status, logs, errors and network from the dashboard's
    in-memory buffers, plus reload, rebuild and restart_metro.
-Learned while testing on laundryheap-mobile: with React Native's prebuilt
+Learned while testing on myapp: with React Native's prebuilt
 core, the port passed at build time (`RCT_METRO_PORT`) is ignored and the app
 still loads from 8081. metroctl therefore sets `RCT_jsLocation=localhost:<port>`
 for the app on the simulator after every successful iOS simulator build, and
