@@ -49,7 +49,7 @@ enum Command {
         #[arg(long)]
         dev: bool,
     },
-    /// Update metroctl to the latest version (remembers the channel)
+    /// Update metroctl to the latest version (stays on the installed build's channel)
     Update {
         #[arg(long)]
         stable: bool,

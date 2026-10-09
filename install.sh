@@ -31,7 +31,7 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-# The channel `metroctl update` follows from now on, recorded below.
+# The channel this build belongs to; `metroctl update` stays on it.
 case "$VERSION" in
   dev) CHANNEL="dev" ;;
   *-dev.*) CHANNEL="dev" ;;
@@ -64,11 +64,6 @@ if [ -w "$INSTALL_DIR" ]; then
 else
   sudo mv /tmp/metroctl "$INSTALL_PATH"
 fi
-
-# Remember the channel so a plain `metroctl update` stays on it.
-CONFIG_DIR="$HOME/.config/metroctl"
-mkdir -p "$CONFIG_DIR"
-printf '{\n  "channel": "%s"\n}\n' "$CHANNEL" > "$CONFIG_DIR/update.json"
 
 echo "Done — metroctl $VERSION ($CHANNEL channel) installed to $INSTALL_PATH"
 

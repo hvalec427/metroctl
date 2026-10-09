@@ -37,22 +37,10 @@ pub fn platform_supported() -> bool {
     cfg!(target_os = "macos") && (cfg!(target_arch = "aarch64") || cfg!(target_arch = "x86_64"))
 }
 
-fn config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".config/metroctl/update.json")
-}
-
-pub fn load_channel() -> Channel {
-    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
-    let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
-    match v.get("channel").and_then(|c| c.as_str()) {
-        Some("nightly") => Channel::Nightly,
-        Some("dev") => Channel::Dev,
-        Some("stable") => Channel::Stable,
-        // Nothing saved (e.g. installed via install.sh): follow the channel the
-        // running build came from, so a dev build doesn't fall back to stable.
-        _ => channel_of(&current_version()),
-    }
+/// The channel (release ring) the running build came from. `update` stays on it
+/// unless --stable / --nightly / --dev switches rings.
+pub fn current_channel() -> Channel {
+    channel_of(&current_version())
 }
 
 /// The channel a version string belongs to.
@@ -64,14 +52,6 @@ pub fn channel_of(version: &str) -> Channel {
     } else {
         Channel::Stable
     }
-}
-
-pub fn save_channel(channel: Channel) {
-    let p = config_path();
-    if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&p, format!("{{\n  \"channel\": \"{}\"\n}}\n", channel.as_str()));
 }
 
 fn client() -> reqwest::blocking::Client {
@@ -291,22 +271,19 @@ fn resolve_channel(stable: bool, nightly: bool, dev: bool) -> Channel {
     } else if stable {
         Channel::Stable
     } else {
-        load_channel()
+        current_channel()
     }
 }
 
-/// `metroctl update` — install the latest build for the chosen/remembered channel.
+/// `metroctl update` — install the latest build for the chosen channel, or the
+/// installed build's own channel.
 pub fn update(stable: bool, nightly: bool, dev: bool, force: bool) {
     if !platform_supported() {
         eprintln!("metroctl self-update is macOS-only (arm64/x64). Build from source on other platforms.");
         std::process::exit(1);
     }
-    let previous = load_channel();
     let channel = resolve_channel(stable, nightly, dev);
-    if stable || nightly || dev {
-        save_channel(channel);
-    }
-    let switched = channel != previous;
+    let switched = channel != current_channel();
     let current = current_version();
 
     let latest = match latest_for_channel(channel) {
