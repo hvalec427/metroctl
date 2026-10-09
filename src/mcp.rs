@@ -66,6 +66,8 @@ fn tools() -> Value {
     let since = json!({ "type": "integer", "description": "Only entries with seq >= this (pass `next` from a previous call)" });
     let limit = json!({ "type": "integer", "description": "Max entries, newest kept (default 50)" });
     json!([
+        { "name": "wait_ready", "description": "Block until the app is built, running and connected to Metro (or the build failed), instead of ending your turn to wait. Use it at the start and after rebuild/restart_metro.",
+          "inputSchema": obj(json!({ "timeout_s": { "type": "integer", "description": "Default 900" } })) },
         { "name": "status", "description": "Session overview: Metro port and state, session status (building/running/build_failed…), connected apps, process tabs.", "inputSchema": obj(json!({})) },
         { "name": "logs", "description": "JS console logs from the app (newest last), with stacks for errors.",
           "inputSchema": obj(json!({
@@ -119,6 +121,7 @@ fn call_tool(name: &str, a: &Value) -> Result<Vec<Value>> {
     }
     match name {
         "status" => Ok(text(fmt_status(&ask("status", json!({}))?))),
+        "wait_ready" => wait_ready(a["timeout_s"].as_u64().unwrap_or(900)),
         "logs" => Ok(text(fmt_logs(&ask("logs", args)?))),
         "network" => Ok(text(fmt_net(&ask("network", args)?))),
         "request" => Ok(text(ask("request", args)?["text"].as_str().unwrap_or("").to_string())),
@@ -176,6 +179,27 @@ fn rebuild(wait: bool) -> Result<Vec<Value>> {
                 return Ok(text(format!("build {other} after {}s. Last output:\n{}", start.elapsed().as_secs(), lines(&out["lines"]))));
             }
         }
+    }
+}
+
+fn wait_ready(timeout_s: u64) -> Result<Vec<Value>> {
+    let start = Instant::now();
+    loop {
+        let s = ask("status", json!({}))?;
+        let status = s["status"].as_str().unwrap_or("");
+        let name = s["device_name"].as_str();
+        let connected = s["apps"].as_array().into_iter().flatten().any(|a| a["status"] == "connected" && name.is_none_or(|n| a["device"].as_str().unwrap_or("").contains(n)));
+        if status.ends_with("failed") {
+            let errors = ask("errors", json!({}))?;
+            return Ok(text(format!("not ready: {status} after {}s\n{}", start.elapsed().as_secs(), fmt_errors(&errors))));
+        }
+        if matches!(status, "running" | "ready") && connected {
+            return Ok(text(format!("ready after {}s\n{}", start.elapsed().as_secs(), fmt_status(&s))));
+        }
+        if start.elapsed() > Duration::from_secs(timeout_s) {
+            return Ok(text(format!("still not ready after {timeout_s}s\n{}", fmt_status(&s))));
+        }
+        std::thread::sleep(Duration::from_secs(3));
     }
 }
 

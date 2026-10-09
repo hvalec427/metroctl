@@ -153,8 +153,8 @@ on, not just look at it. No Maestro.
 
 | Target | Screen | Element tree (ids, text, bounds) | Tap / swipe / type |
 |---|---|---|---|
-| iOS simulator | `xcrun simctl io <udid> screenshot` | AXe `axe describe-ui --udid` (or idb `ui describe-all`) | `axe tap`, `axe swipe`, `axe type` |
-| iOS device | WebDriverAgent `GET /screenshot` | WebDriverAgent `GET /source` (accessibility identifiers) | WebDriverAgent tap / drag / keys |
+| iOS simulator + device | WebDriverAgent `GET /screenshot` (or `simctl io` on simulators) | WebDriverAgent `GET /source` (accessibility identifiers = testIDs) | WebDriverAgent tap / drag / keys |
+| iOS simulator, fallback | `xcrun simctl io <udid> screenshot` | AXe `axe describe-ui --udid` | `axe tap`, `axe swipe`, `axe type` |
 | Android device + emulator | `adb exec-out screencap -p` | `adb shell uiautomator dump` (resource-id, text, content-desc, bounds) | `adb shell input tap/swipe/text` |
 
 - New tools: `ui` (a compact element tree: role, id/testID, label, center
@@ -166,7 +166,11 @@ on, not just look at it. No Maestro.
 - The session's pinned device decides the backend. Sessions on real devices
   and Android need `--device` pinning to cover those (today `up` only creates
   iOS simulators).
-- iOS devices need WebDriverAgent built and running on the phone
+- WebDriverAgent for all of iOS: one backend for simulators and devices,
+  the same thing Maestro runs underneath (an XCTest runner), without
+  Maestro's JVM/YAML layer. AXe is the no-setup fallback on simulators
+  while WDA isn't built yet.
+- WebDriverAgent has to be built and running on the simulator or phone
   (`xcodebuild test-without-building` with the WDA runner, port-forwarded with
   `iproxy`). metroctl should start and track it like the other processes.
 - Check tools at startup and report what's missing (`brew install

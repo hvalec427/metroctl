@@ -44,6 +44,9 @@ pub fn launch(opts: UpOpts) {
 /// Apply `up` options before the dashboard opens: the port override and the
 /// device to pin (creating a simulator if asked).
 fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> {
+    for d in session::reap_stale() {
+        eprintln!("{d}");
+    }
     match opts.port {
         Some(Some(p)) => project.set_metro_port(p),
         Some(None) => project.set_metro_port(session::free_port(project.metro_port())?),
@@ -55,9 +58,12 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
         eprintln!("creating simulator {name}…");
         let (udid, desc) = session::create_simulator(&name, opts.sim_runtime.as_deref(), opts.sim_type.as_deref())?;
         eprintln!("created {desc} ({udid})");
-        Some(Pinned { udid, created: true, simulator: true, cleanup })
+        Some(Pinned { udid, created: true, simulator: true, cleanup, name: Some(name) })
     } else {
-        opts.device.as_ref().map(|udid| Pinned { udid: udid.clone(), created: false, simulator: session::sim_state(udid).is_some(), cleanup })
+        opts.device.as_ref().map(|udid| {
+            let info = session::sim_info(udid);
+            Pinned { udid: udid.clone(), created: false, simulator: info.is_some(), cleanup, name: info.map(|i| i.1) }
+        })
     };
     let up = opts.port.is_some() || pinned.is_some() || opts.install;
     Ok(Setup { pinned, install: opts.install, start: up })

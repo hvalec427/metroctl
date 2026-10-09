@@ -59,6 +59,12 @@ enum Command {
         #[arg(long)]
         install: bool,
     },
+    /// Clean up after metroctl sessions that died (simulators, app port settings)
+    Gc {
+        /// Also delete `metroctl-*` simulators no running session owns
+        #[arg(long)]
+        sims: bool,
+    },
     /// Stop the metroctl session running in this checkout and delete the simulator it created
     Down {
         /// Keep the simulator
@@ -134,6 +140,12 @@ fn main() {
             commands_rn::launch(session::UpOpts { port, device, new_sim, sim_type, sim_runtime, sim_cleanup: Some(sim_cleanup), install })
         }
         Some(Command::Down { keep_sim }) => commands_rn::down(keep_sim),
+        Some(Command::Gc { sims }) => {
+            if let Err(e) = session::gc(sims) {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+        }
         Some(Command::Mcp) => mcp::run(),
         Some(Command::Ctl { cmd, args }) => {
             if let Err(e) = control::ctl(&cmd, args.as_deref()) {

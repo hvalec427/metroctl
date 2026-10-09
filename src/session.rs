@@ -40,6 +40,7 @@ pub struct Pinned {
     pub created: bool,         // we created it, so we may delete it
     pub simulator: bool,       // false for a physical device (nothing to boot)
     pub cleanup: SimCleanup,
+    pub name: Option<String>, // device name, to tell its app apart from others on the same Metro
 }
 
 /// `.metroctl/session.json`.
@@ -53,6 +54,9 @@ pub struct SessionFile {
     #[serde(default)]
     pub created_sim: bool,
     pub status: String,
+    /// iOS bundle id of the app (to release it on `down`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
     /// Control socket (JSON lines), see `control.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket: Option<String>,
@@ -130,19 +134,74 @@ pub fn pid_alive(pid: u32) -> bool {
 
 /// Sessions that are still running (stale entries are cleaned up).
 fn live_sessions() -> Vec<SessionFile> {
+    reap_stale();
     let Ok(rd) = std::fs::read_dir(global_dir()) else {
         return Vec::new();
     };
-    rd.flatten()
-        .filter_map(|e| {
-            let s: SessionFile = serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()?;
-            if s.pid != std::process::id() && !pid_alive(s.pid) {
-                let _ = std::fs::remove_file(e.path());
-                return None;
+    rd.flatten().filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()).collect()
+}
+
+/// Clean up after sessions whose process died without doing it themselves
+/// (killed, crashed, window closed): delete the simulator they created, or
+/// stop the app they pointed at their port, which another session may reuse.
+/// Returns what was cleaned.
+pub fn reap_stale() -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(global_dir()) else {
+        return Vec::new();
+    };
+    let mut done = Vec::new();
+    for e in rd.flatten() {
+        let Some(s) = std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<SessionFile>(&b).ok()) else {
+            let _ = std::fs::remove_file(e.path());
+            continue;
+        };
+        if s.pid == std::process::id() || pid_alive(s.pid) {
+            continue;
+        }
+        if let Some(udid) = &s.udid {
+            if s.created_sim {
+                if delete_simulator(udid).is_ok() {
+                    done.push(format!("deleted simulator {udid} of a dead session in {}", s.root));
+                }
+            } else if let Some(bundle) = &s.bundle {
+                release_app(udid, bundle);
+                done.push(format!("released the app on {udid} (dead session in {})", s.root));
             }
-            Some(s)
-        })
-        .collect()
+        }
+        // Its worktree's session file, unless a newer session replaced it.
+        let root = Path::new(&s.root);
+        if read_session(root).is_some_and(|w| w.pid == s.pid) {
+            let _ = std::fs::remove_file(session_path(root));
+        }
+        let _ = std::fs::remove_file(e.path());
+    }
+    done
+}
+
+/// `metroctl gc`: clean up dead sessions; with `sims`, also delete
+/// `metroctl-*` simulators no running session owns.
+pub fn gc(sims: bool) -> Result<()> {
+    let done = reap_stale();
+    for d in &done {
+        println!("{d}");
+    }
+    let mut n = done.len();
+    if sims {
+        let owned: Vec<String> = live_sessions().into_iter().filter_map(|s| s.udid).collect();
+        let v = simctl_json(&["list", "devices"])?;
+        for d in v["devices"].as_object().into_iter().flat_map(|o| o.values()).flat_map(|l| l.as_array().into_iter().flatten()) {
+            let (name, udid) = (d["name"].as_str().unwrap_or(""), d["udid"].as_str().unwrap_or(""));
+            if name.starts_with("metroctl-") && !owned.iter().any(|o| o == udid) {
+                delete_simulator(udid)?;
+                println!("deleted orphaned simulator {name} ({udid})");
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        println!("nothing to clean up");
+    }
+    Ok(())
 }
 
 /// First port from `start` that's neither listening nor claimed by a session.
@@ -163,8 +222,22 @@ fn simctl_json(args: &[&str]) -> Result<Value> {
 
 /// Simulator state (`Booted`, `Shutdown`, …), or `None` if `udid` isn't a simulator.
 pub fn sim_state(udid: &str) -> Option<String> {
+    sim_info(udid).map(|(state, _)| state)
+}
+
+/// (state, name) of a simulator, or `None` if `udid` isn't one.
+pub fn sim_info(udid: &str) -> Option<(String, String)> {
     let v = simctl_json(&["list", "devices"]).ok()?;
-    v["devices"].as_object()?.values().flat_map(|l| l.as_array().into_iter().flatten()).find(|d| d["udid"] == udid).map(|d| d["state"].as_str().unwrap_or("").to_string())
+    let d = v["devices"].as_object()?.values().flat_map(|l| l.as_array().into_iter().flatten()).find(|d| d["udid"] == udid)?;
+    Some((d["state"].as_str().unwrap_or("").to_string(), d["name"].as_str().unwrap_or("").to_string()))
+}
+
+/// Undo `point_app_at_port` when a session ends: the simulator may outlive
+/// it, and its app would otherwise keep loading from (and later connect to
+/// whatever reuses) this session's port.
+pub fn release_app(udid: &str, bundle: &str) {
+    let _ = Command::new("xcrun").args(["simctl", "terminate", udid, bundle]).output();
+    let _ = Command::new("xcrun").args(["simctl", "spawn", udid, "defaults", "delete", bundle, "RCT_jsLocation"]).output();
 }
 
 /// Version as comparable numbers ("18.2" → [18, 2]).
@@ -293,6 +366,8 @@ pub fn down(root: &Path, keep_sim: bool) -> Result<()> {
     if let (Some(udid), true, false) = (&s.udid, s.created_sim, keep_sim) {
         delete_simulator(udid)?;
         println!("deleted simulator {udid}");
+    } else if let (Some(udid), Some(bundle)) = (&s.udid, &s.bundle) {
+        release_app(udid, bundle);
     }
     remove_session(root);
     Ok(())

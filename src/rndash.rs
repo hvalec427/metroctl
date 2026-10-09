@@ -168,6 +168,13 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
     ratatui::restore();
     let root = app.root();
     let delete = app.delete_sim_on_quit.then(|| app.pinned.as_ref().map(|p| p.udid.clone())).flatten();
+    // A kept simulator: stop its app from pointing at our (soon free) port.
+    // On SIGTERM `metroctl down` does this (or deletes the simulator).
+    if let (None, false, Some(p), Some(bundle)) = (&delete, app.term.load(Ordering::Relaxed), &app.pinned, app.project.ios_bundle_id()) {
+        if p.simulator {
+            session::release_app(&p.udid, bundle);
+        }
+    }
     let socket = app.socket.clone();
     drop(app); // stops Metro and the other processes
     session::remove_session(&root);
@@ -466,7 +473,10 @@ impl DashApp {
 
     /// Answer a control-socket request (see `control.rs`).
     fn control(&mut self, cmd: &str, a: &Value) -> Value {
-        let s = |k: &str| a[k].as_str().filter(|v| !v.is_empty());
+        // Default to this session's own device: another app can be connected to
+        // the same Metro (e.g. a simulator still pointing at this port).
+        let pinned_name = self.pinned.as_ref().and_then(|p| p.name.clone());
+        let s = |k: &str| a[k].as_str().filter(|v| !v.is_empty()).or(if k == "device" { pinned_name.as_deref() } else { None });
         let since = a["since"].as_u64().unwrap_or(0);
         let limit = a["limit"].as_u64().map_or(50, |n| n as usize);
         let proc_json = |p: &PtyProcess| json!({ "label": p.label, "running": p.is_alive(), "exit_code": p.exit_code() });
@@ -479,6 +489,7 @@ impl DashApp {
                     "port": self.project.metro_port(),
                     "status": self.status,
                     "device": self.pinned.as_ref().map(|p| p.udid.clone()),
+                    "device_name": self.pinned.as_ref().and_then(|p| p.name.clone()),
                     "metro": if self.metro_external { "external" } else if metro.is_some_and(|p| p.is_alive()) { "running" } else { "stopped" },
                     "apps": self.rnview.apps_json(),
                     "processes": self.procs.iter().map(proc_json).collect::<Vec<_>>(),
@@ -524,7 +535,7 @@ impl DashApp {
                 json!({ "ok": true, "port": self.project.metro_port() })
             }
             "rebuild" => {
-                let Some(udid) = s("device").map(String::from).or_else(|| self.pinned.as_ref().map(|p| p.udid.clone())) else {
+                let Some(udid) = a["device"].as_str().filter(|d| !d.is_empty()).map(String::from).or_else(|| self.pinned.as_ref().map(|p| p.udid.clone())) else {
                     return json!({ "error": "no device: this session isn't pinned to one, pass device (udid)" });
                 };
                 let before = self.procs.len();
@@ -594,6 +605,7 @@ impl DashApp {
                 udid: self.pinned.as_ref().map(|p| p.udid.clone()),
                 created_sim: self.pinned.as_ref().is_some_and(|p| p.created),
                 status: self.status.clone(),
+                bundle: self.project.ios_bundle_id().map(String::from),
                 socket: self.socket.as_ref().map(|p| p.display().to_string()),
             },
         );
