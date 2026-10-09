@@ -844,7 +844,7 @@ fn footer(view: &RnView, is_logs: bool) -> String {
                 let copy = if is_logs { "" } else { " · c curl" };
                 // side-by-side: jk moves the list, JK the panel; maximized: both move the panel.
                 let nav = if view.maximized { "jk/JK move" } else { "jk list · JK move" };
-                return format!(" ⏎ close · {z} · {nav} · / search{nn} · V select · y copy{copy} · o nvim · q quit");
+                return format!(" ⏎ close · {z} · {nav} · {{}} sect · / search{nn} · V select · y copy{copy} · o nvim · q quit");
             }
             let nn = if view.search.is_empty() { "" } else { " · n/N" };
             let scroll = if view.follow { "on" } else { "off" };
@@ -958,6 +958,25 @@ fn keep_cursor_visible(view: &mut RnView) {
     }
 }
 
+/// Move the preview cursor to the next/prev section header (`── … ──`) — the
+/// Stack divider in logs, or the headers/body dividers in a network entry.
+fn jump_section(view: &mut RnView, dir: i32) {
+    let lines = view.detail_wrapped();
+    let is_header = |s: &str| s.trim_start().starts_with("──");
+    let cur = view.detail_cursor;
+    let target = if dir > 0 {
+        lines.iter().enumerate().skip(cur + 1).find(|(_, l)| is_header(l)).map(|(i, _)| i)
+    } else {
+        // Previous header, or the top of the panel if there's none above.
+        lines.iter().enumerate().take(cur).filter(|(_, l)| is_header(l)).last().map(|(i, _)| i).or(Some(0))
+    };
+    if let Some(i) = target {
+        view.detail_cursor = i;
+        keep_cursor_visible(view);
+        view.detail_hit = None;
+    }
+}
+
 /// Reset the preview cursor/scroll to the top — call when the side-by-side list
 /// selection changes so the panel starts fresh on the new entry.
 fn reset_detail_cursor(view: &mut RnView) {
@@ -1059,10 +1078,25 @@ fn resolve_path(file: &str, root: Option<&str>) -> String {
     }
 }
 
+/// The unwrapped logical detail line under the cursor, so a frame split across
+/// two visual rows (narrow side-by-side panel) still parses.
+fn source_line_at_cursor(view: &RnView) -> Option<String> {
+    let src = view.detail_source();
+    let width = view.detail_width.max(1);
+    let mut acc = 0;
+    for line in &src {
+        let n = wrap(line, width).len().max(1);
+        if view.detail_cursor < acc + n {
+            return Some(line.clone());
+        }
+        acc += n;
+    }
+    src.last().cloned()
+}
+
 fn open_at_cursor(view: &mut RnView) {
-    let lines = view.detail_wrapped();
-    let line = match lines.get(view.detail_cursor) {
-        Some(l) => l.clone(),
+    let line = match source_line_at_cursor(view) {
+        Some(l) => l,
         None => return,
     };
     let (file, line_no) = match parse_location(&line) {
@@ -1285,6 +1319,9 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
         KeyCode::Char('p') => view.clear_on_restart = !view.clear_on_restart,
         // Open the stack frame under the cursor in the already-running nvim.
         KeyCode::Char('o') if view.detail => open_at_cursor(view),
+        // Jump between detail sections (── Stack ──, Request/Response headers/body …).
+        KeyCode::Char('}') if view.detail => jump_section(view, 1),
+        KeyCode::Char('{') if view.detail => jump_section(view, -1),
         KeyCode::Char('V') => {
             if view.visual.is_some() {
                 view.visual = None;

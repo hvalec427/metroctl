@@ -16,6 +16,7 @@ const SCROLLBACK: usize = 5000;
 
 pub struct PtyProcess {
     pub label: String,
+    pub cmd: String,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
@@ -74,6 +75,7 @@ impl PtyProcess {
 
         Ok(PtyProcess {
             label: label.into(),
+            cmd: command.to_string(),
             master: pair.master,
             writer,
             child: Arc::new(Mutex::new(child)),

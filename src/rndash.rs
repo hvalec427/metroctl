@@ -89,6 +89,7 @@ pub struct DashApp {
     project: ProjectConfig,
     procs: Vec<PtyProcess>,
     proc_sel: usize,
+    proc_scroll: usize, // scrollback offset for the focused process (0 = live)
     metro_idx: Option<usize>,
     client: RnClient,
     rnview: RnView,
@@ -214,6 +215,7 @@ impl DashApp {
             project,
             procs: Vec::new(),
             proc_sel: 0,
+            proc_scroll: 0,
             metro_idx: None,
             client,
             rnview,
@@ -254,6 +256,7 @@ impl DashApp {
         match PtyProcess::spawn(label, command, &self.root(), &env, rows, cols) {
             Ok(p) => {
                 self.procs.push(p);
+                self.proc_scroll = 0; // follow the fresh output
                 Some(self.procs.len() - 1)
             }
             Err(e) => {
@@ -701,15 +704,19 @@ impl DashApp {
     }
 
     fn processes_key(&mut self, key: KeyEvent) {
+        // Rough page size for scrolling the output.
+        let page = self.proc_area.map(|r| r.height as usize).unwrap_or(20).max(1);
         match key.code {
             KeyCode::Char('[') => {
                 if !self.procs.is_empty() {
                     self.proc_sel = (self.proc_sel + self.procs.len() - 1) % self.procs.len();
+                    self.proc_scroll = 0; // each tab shows live until scrolled
                 }
             }
             KeyCode::Char(']') => {
                 if !self.procs.is_empty() {
                     self.proc_sel = (self.proc_sel + 1) % self.procs.len();
+                    self.proc_scroll = 0;
                 }
             }
             KeyCode::Enter => {
@@ -719,6 +726,13 @@ impl DashApp {
                     self.set_flash("no running process in this tab");
                 }
             }
+            // Scroll the output into history (0 = live bottom). Capped at the vt100 scrollback.
+            KeyCode::Char('k') | KeyCode::Up => self.proc_scroll = (self.proc_scroll + 1).min(5000),
+            KeyCode::Char('j') | KeyCode::Down => self.proc_scroll = self.proc_scroll.saturating_sub(1),
+            KeyCode::Char('K') | KeyCode::PageUp => self.proc_scroll = (self.proc_scroll + page).min(5000),
+            KeyCode::Char('J') | KeyCode::PageDown => self.proc_scroll = self.proc_scroll.saturating_sub(page),
+            KeyCode::Char('g') => self.proc_scroll = 5000,
+            KeyCode::Char('G') => self.proc_scroll = 0,
             KeyCode::Char('x') => self.stop_selected_proc(),
             KeyCode::Char('m') => self.start_metro(),
             KeyCode::Char('c') => self.deep_clean(),
@@ -945,23 +959,36 @@ fn render_processes(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let (content, hint) = split_hint(inner);
-    app.proc_area = Some(content);
+    // Reserve the top line of the pane for the command that produced this output.
+    let (cmd_area, body) = if content.height >= 2 {
+        let cmd_area = Rect { x: content.x, y: content.y, width: content.width, height: 1 };
+        let body = Rect { x: content.x, y: content.y + 1, width: content.width, height: content.height - 1 };
+        (Some(cmd_area), body)
+    } else {
+        (None, content)
+    };
+    app.proc_area = Some(body);
 
     match app.procs.get(app.proc_sel) {
         // Keep showing the output whether the process is running or finished —
         // the tab label carries the ✓ / ✗exit status. This way a clean/install
         // that failed still shows WHY on screen.
         Some(p) => {
-            let lines = pty_lines(&p.parser(), content.width, content.height);
-            frame.render_widget(Paragraph::new(Text::from(lines)), content);
+            if let Some(ca) = cmd_area {
+                let marker = if app.proc_scroll > 0 { format!("  [↑ {} — G: live]", app.proc_scroll) } else { String::new() };
+                let head = format!("$ {}{marker}", p.cmd);
+                frame.render_widget(Paragraph::new(head).style(Style::default().fg(Color::DarkGray)), ca);
+            }
+            let lines = pty_lines(&p.parser(), body.width, body.height, app.proc_scroll);
+            frame.render_widget(Paragraph::new(Text::from(lines)), body);
         }
         None => {
             let msg = Paragraph::new("Press  m  to start Metro.").style(Style::default().fg(Color::DarkGray));
-            frame.render_widget(msg, content);
+            frame.render_widget(msg, body);
         }
     }
     if let Some(h) = hint {
-        render_hint(frame, h, " [ ] tab · ⏎ type · x stop · m metro · c clean · i install · a reset", focused);
+        render_hint(frame, h, " [ ] tab · ⏎ type · x stop · kj/JK scroll · G live · m metro · c clean · i install · a reset", focused);
     }
 }
 
@@ -1054,11 +1081,12 @@ fn render_status(app: &DashApp, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(padded).style(style), area);
 }
 
-fn pty_lines(parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, width: u16, height: u16) -> Vec<Line<'static>> {
-    let guard = match parser.lock() {
+fn pty_lines(parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, width: u16, height: u16, scrollback: usize) -> Vec<Line<'static>> {
+    let mut guard = match parser.lock() {
         Ok(g) => g,
         Err(_) => return Vec::new(),
     };
+    guard.set_scrollback(scrollback); // 0 = live bottom; >0 scrolls into history
     let screen = guard.screen();
     let (srows, scols) = screen.size();
     let h = height.min(srows);
