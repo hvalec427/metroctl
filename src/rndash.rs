@@ -16,6 +16,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -243,8 +244,12 @@ impl DashApp {
     }
 
     fn spawn_proc(&mut self, label: &str, command: &str) -> Option<usize> {
+        self.spawn_proc_env(label, command, self.project.command_env())
+    }
+
+    fn spawn_proc_env(&mut self, label: &str, command: &str, env: BTreeMap<String, String>) -> Option<usize> {
         let (rows, cols) = self.pty_size();
-        match PtyProcess::spawn(label, command, &self.root(), &self.project.command_env(), rows, cols) {
+        match PtyProcess::spawn(label, command, &self.root(), &env, rows, cols) {
             Ok(p) => {
                 self.procs.push(p);
                 Some(self.procs.len() - 1)
@@ -315,7 +320,7 @@ impl DashApp {
         }
     }
 
-    fn run_platform(&mut self, android: bool, device_flag: Option<String>) {
+    fn run_platform(&mut self, android: bool, device_flag: Option<String>, serial: Option<String>) {
         let (label, mut cmd) = if android {
             ("Android", self.project.android_command())
         } else {
@@ -330,7 +335,15 @@ impl DashApp {
                 cmd = format!("{cmd}{sep}{args}");
             }
         }
-        if let Some(i) = self.spawn_proc(label, &cmd) {
+        // Android: also pin the device via ANDROID_SERIAL so adb (install +
+        // launch, under gradle) can't pick a different connected device.
+        let mut env = self.project.command_env();
+        if android {
+            if let Some(s) = &serial {
+                env.insert("ANDROID_SERIAL".to_string(), s.clone());
+            }
+        }
+        if let Some(i) = self.spawn_proc_env(label, &cmd, env) {
             self.proc_sel = i;
             self.focus = Pane::Processes;
             self.set_flash(format!("running: {cmd}"));
@@ -348,21 +361,29 @@ impl DashApp {
                 return;
             }
         };
+        let android = dev.platform == Platform::Android;
         if !dev.running {
             if let Some(target) = dev.boot.clone() {
                 self.boot_target(target, dev.label.clone());
             }
+            // Android's adb serial only exists once the emulator is running —
+            // without it the build would target whatever device adb defaults to
+            // (the wrong one). So boot now and have the user re-run once it's up.
+            // iOS can target by udid even before boot, so it proceeds.
+            if android {
+                self.set_flash("emulator starting — press ⏎ again once it shows running");
+                return;
+            }
         }
-        let android = dev.platform == Platform::Android;
-        // Target this device: iOS by udid (known even pre-boot); Android by adb
-        // serial (only once running — a freshly launched emulator falls back to
-        // the RN CLI default, which is the one we just started).
+        // Target this exact device: iOS by udid; Android by adb serial (+ the
+        // ANDROID_SERIAL env, set in run_platform).
+        let serial = dev.android_serial();
         let device_flag = if android {
-            dev.android_serial().map(|s| format!("--deviceId {s}"))
+            serial.as_ref().map(|s| format!("--deviceId {s}"))
         } else {
             dev.ios_udid().map(|u| format!("--udid {u}"))
         };
-        self.run_platform(android, device_flag);
+        self.run_platform(android, device_flag, serial);
     }
 
     /// Start (boot) the highlighted simulator/emulator.
