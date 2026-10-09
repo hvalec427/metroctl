@@ -233,6 +233,7 @@ struct Device {
     status: Status,
     network_supported: bool,
     was_disconnected: bool,
+    has_context: bool, // seen this connection's first executionContextCreated
     perf: PerfState,
     /// `Some` while the JS VM is suspended at a breakpoint/step on this device.
     paused: Option<PausedInfo>,
@@ -240,7 +241,14 @@ struct Device {
 
 impl Default for Device {
     fn default() -> Self {
-        Device { logs: Vec::new(), net: Vec::new(), status: Status::Connecting, network_supported: true, was_disconnected: false, perf: PerfState::default(), paused: None }
+        Device { logs: Vec::new(), net: Vec::new(), status: Status::Connecting, network_supported: true, was_disconnected: false, has_context: false, perf: PerfState::default(), paused: None }
+    }
+}
+
+impl Device {
+    fn clear(&mut self) {
+        self.logs.clear();
+        self.net.clear();
     }
 }
 
@@ -405,10 +413,10 @@ impl RnView {
                 }
                 if s == Status::Connected {
                     if d.was_disconnected && clear {
-                        d.logs.clear();
-                        d.net.clear();
+                        d.clear();
                     }
                     d.was_disconnected = false;
+                    d.has_context = false;
                 }
                 d.status = s;
             }
@@ -440,13 +448,22 @@ impl RnView {
             RnEvent::Resumed(key) => {
                 self.dev(&key).paused = None;
             }
+            // A reload (Metro `r`, ⇧R, dev menu) swaps the JS context: RN sends
+            // contextsCleared, and a fresh executionContextCreated after the
+            // first one on a connection means the same. Fast Refresh keeps the
+            // context, so it doesn't clear.
             RnEvent::ContextCleared(key) => {
+                if self.clear_on_restart {
+                    self.dev(&key).clear();
+                }
+            }
+            RnEvent::ContextCreated(key) => {
                 let clear = self.clear_on_restart;
                 let d = self.dev(&key);
-                if clear {
-                    d.logs.clear();
-                    d.net.clear();
+                if d.has_context && clear {
+                    d.clear();
                 }
+                d.has_context = true;
             }
             RnEvent::Perf(key, s) => {
                 let d = self.dev(&key);
@@ -666,7 +683,7 @@ fn render_view(view: &mut RnView, frame: &mut Frame, area: Rect) {
         let lbl = |t: Tab, s: String| if view.tab == t { format!("[{s}]") } else { format!(" {s} ") };
         format!("{} {} {}", lbl(Tab::Logs, format!("Logs ({logs_n})")), lbl(Tab::Network, format!("Network ({net_n})")), lbl(Tab::Perf, "Perf".into()))
     };
-    let restart = if view.clear_on_restart { "clears logs on restart" } else { "keeps logs on restart" };
+    let restart = if view.clear_on_restart { "clears logs on reload" } else { "keeps logs on reload" };
     let mut net_filters = String::new();
     if !is_logs && (view.errors_only || view.method_idx != 0) {
         let mut parts = Vec::new();
@@ -856,7 +873,7 @@ fn footer(view: &RnView, is_logs: bool) -> String {
             let scroll = if view.follow { "on" } else { "off" };
             let netf = if is_logs { "" } else { " · e errors · m method" };
             let restart = if view.clear_on_restart { "clear" } else { "keep" };
-            format!(" [ ] tabs · 1-9 dev · jk/g/G move · / search{nn} · f filter · ⏎ preview · z max · V select · y copy{netf} · space/a scroll:{scroll} · c clear · p restart:{restart} · R reload · q quit")
+            format!(" [ ] tabs · 1-9 dev · jk/g/G move · / search{nn} · f filter · ⏎ preview · z max · V select · y copy{netf} · space/a scroll:{scroll} · c clear · p reload:{restart} · R reload · q quit")
         }
     }
 }

@@ -118,6 +118,7 @@ pub enum RnEvent {
     Net(String, NetRecord),
     Network(String, bool),
     ContextCleared(String),
+    ContextCreated(String), // a JS context came up (also sent once per connection)
     Perf(String, PerfSample),
     /// The JS VM hit a breakpoint / `debugger;` / step and is now suspended.
     Paused(String, PausedInfo),
@@ -467,6 +468,9 @@ fn handle_message(
         "Runtime.executionContextsCleared" => {
             records.clear();
             let _ = tx.send(RnEvent::ContextCleared(key.into()));
+        }
+        "Runtime.executionContextCreated" => {
+            let _ = tx.send(RnEvent::ContextCreated(key.into()));
         }
         m if m.starts_with("Network.") => handle_network(key, m, &msg["params"], tx, records, socket, seq),
         _ => {}
