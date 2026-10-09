@@ -6,6 +6,7 @@
 //! reload/dev-menu, quit). The Metro PTY takes raw-key passthrough in input mode,
 //! so `r`/`d`/`j` and anything else Metro supports work as in a normal terminal.
 
+use crate::control;
 use crate::devinfo;
 use crate::metro_events;
 use crate::proc::PtyProcess;
@@ -19,6 +20,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -134,6 +136,8 @@ pub struct DashApp {
     term: Arc<AtomicBool>,      // SIGTERM/SIGHUP received (e.g. `metroctl down`)
     delete_sim_on_quit: bool,
     sim_builds: Vec<(usize, String)>, // iOS simulator build tabs → udid, to point the app at our port
+    ctl_rx: Receiver<control::Request>,
+    socket: Option<PathBuf>, // control socket, when it could be bound
 }
 
 /// What `metroctl up` asked for, applied once the dashboard opens.
@@ -164,8 +168,12 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
     ratatui::restore();
     let root = app.root();
     let delete = app.delete_sim_on_quit.then(|| app.pinned.as_ref().map(|p| p.udid.clone())).flatten();
+    let socket = app.socket.clone();
     drop(app); // stops Metro and the other processes
     session::remove_session(&root);
+    if let Some(p) = socket {
+        let _ = std::fs::remove_file(p);
+    }
     if let Some(udid) = delete {
         eprintln!("deleting simulator {udid}…");
         if let Err(e) = session::delete_simulator(&udid) {
@@ -324,6 +332,9 @@ impl DashApp {
                 std::thread::sleep(Duration::from_millis(2500));
             }
         });
+        let (ctl_tx, ctl_rx) = std::sync::mpsc::channel();
+        let path = control::socket_path();
+        let socket = control::serve(&path, ctl_tx).ok().map(|_| path);
         let mut rnview = RnView::new(None);
         rnview.set_root(Some(project.root.clone()));
         rnview.set_embedded(true);
@@ -355,6 +366,8 @@ impl DashApp {
             term: Arc::new(AtomicBool::new(false)),
             delete_sim_on_quit: false,
             sim_builds: Vec::new(),
+            ctl_rx,
+            socket,
         }
     }
 
@@ -451,6 +464,83 @@ impl DashApp {
         }
     }
 
+    /// Answer a control-socket request (see `control.rs`).
+    fn control(&mut self, cmd: &str, a: &Value) -> Value {
+        let s = |k: &str| a[k].as_str().filter(|v| !v.is_empty());
+        let since = a["since"].as_u64().unwrap_or(0);
+        let limit = a["limit"].as_u64().map_or(50, |n| n as usize);
+        let proc_json = |p: &PtyProcess| json!({ "label": p.label, "running": p.is_alive(), "exit_code": p.exit_code() });
+        match cmd {
+            "status" => {
+                let metro = self.metro_idx.and_then(|i| self.procs.get(i));
+                json!({
+                    "project": self.project.name,
+                    "root": self.project.root,
+                    "port": self.project.metro_port(),
+                    "status": self.status,
+                    "device": self.pinned.as_ref().map(|p| p.udid.clone()),
+                    "metro": if self.metro_external { "external" } else if metro.is_some_and(|p| p.is_alive()) { "running" } else { "stopped" },
+                    "apps": self.rnview.apps_json(),
+                    "processes": self.procs.iter().map(proc_json).collect::<Vec<_>>(),
+                })
+            }
+            "logs" => self.rnview.logs_json(s("device"), s("level"), s("filter"), since, limit),
+            "network" => self.rnview.net_json(s("device"), a["failed_only"].as_bool().unwrap_or(false), s("filter"), since, limit),
+            "request" => match s("id").and_then(|id| self.rnview.request_text(s("device"), id)) {
+                Some(t) => json!({ "text": t }),
+                None => json!({ "error": "no request with that id (see network)" }),
+            },
+            "errors" => {
+                let failed: Vec<Value> = self
+                    .procs
+                    .iter()
+                    .filter(|p| p.exit_code().is_some_and(|c| c != 0))
+                    .map(|p| json!({ "label": p.label, "exit_code": p.exit_code(), "tail": p.tail_text(40) }))
+                    .collect();
+                json!({
+                    "status": self.status,
+                    "logs": self.rnview.logs_json(s("device"), Some("error"), None, since, limit.min(20)),
+                    "requests": self.rnview.net_json(s("device"), true, None, since, limit.min(20)),
+                    "failed_processes": failed,
+                })
+            }
+            "output" => {
+                let want = s("process").map(str::to_lowercase);
+                let p = match &want {
+                    Some(w) => self.procs.iter().rev().find(|p| p.label.to_lowercase().contains(w)),
+                    None => self.procs.last(),
+                };
+                match p {
+                    Some(p) => json!({ "label": p.label, "running": p.is_alive(), "exit_code": p.exit_code(), "lines": p.tail_text(a["lines"].as_u64().map_or(80, |n| n as usize)) }),
+                    None => json!({ "error": "no such process", "processes": self.procs.iter().map(|p| p.label.clone()).collect::<Vec<_>>() }),
+                }
+            }
+            "reload" => {
+                self.metro_key(b'r', "reload");
+                json!({ "ok": true, "message": self.flash.as_ref().map(|f| f.0.clone()) })
+            }
+            "restart_metro" => {
+                self.start_metro();
+                json!({ "ok": true, "port": self.project.metro_port() })
+            }
+            "rebuild" => {
+                let Some(udid) = s("device").map(String::from).or_else(|| self.pinned.as_ref().map(|p| p.udid.clone())) else {
+                    return json!({ "error": "no device: this session isn't pinned to one, pass device (udid)" });
+                };
+                let before = self.procs.len();
+                self.run_platform(false, Some(udid));
+                if self.procs.len() == before {
+                    return json!({ "error": self.flash.as_ref().map(|f| f.0.clone()) });
+                }
+                // Track it like the setup build, so the session status follows it.
+                self.setup = Some(SetupRun { install: None, boot: None, build: Some(before), metro_started: true });
+                self.set_status("building");
+                json!({ "ok": true, "process": self.procs[before].label })
+            }
+            _ => json!({ "error": format!("unknown command {cmd:?}"), "commands": ["status", "logs", "errors", "network", "request", "output", "reload", "rebuild", "restart_metro"] }),
+        }
+    }
+
     fn is_simulator(&self, udid: &str) -> bool {
         self.devices.iter().any(|d| matches!(&d.boot, Some(BootTarget::IosSim(u)) if u == udid))
             || self.pinned.as_ref().is_some_and(|p| p.simulator && p.udid == udid)
@@ -504,6 +594,7 @@ impl DashApp {
                 udid: self.pinned.as_ref().map(|p| p.udid.clone()),
                 created_sim: self.pinned.as_ref().is_some_and(|p| p.created),
                 status: self.status.clone(),
+                socket: self.socket.as_ref().map(|p| p.display().to_string()),
             },
         );
     }
@@ -965,6 +1056,10 @@ impl DashApp {
                 }
             }
 
+            while let Ok(r) = self.ctl_rx.try_recv() {
+                let reply = self.control(&r.cmd, &r.args);
+                let _ = r.reply.send(reply);
+            }
             self.advance_setup();
             self.finish_sim_builds();
             if self.term.load(Ordering::Relaxed) {

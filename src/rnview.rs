@@ -112,6 +112,13 @@ pub fn to_curl(rec: &NetRecord) -> String {
     parts.join(" \\\n  ")
 }
 
+fn truncate(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}… ({} more chars)", &s[..i], s[i..].chars().count()),
+        None => s.to_string(),
+    }
+}
+
 fn one_line(s: &str) -> String {
     s.replace(['\r', '\n', '\t'], " ")
 }
@@ -237,11 +244,16 @@ struct Device {
     perf: PerfState,
     /// `Some` while the JS VM is suspended at a breakpoint/step on this device.
     paused: Option<PausedInfo>,
+    // Totals ever added, so entries keep stable sequence numbers (for `since`
+    // over the control socket) across trimming and clears: logs[i] has seq
+    // `log_seq - logs.len() + i`.
+    log_seq: u64,
+    net_seq: u64,
 }
 
 impl Default for Device {
     fn default() -> Self {
-        Device { logs: Vec::new(), net: Vec::new(), status: Status::Connecting, network_supported: true, was_disconnected: false, has_context: false, perf: PerfState::default(), paused: None }
+        Device { logs: Vec::new(), net: Vec::new(), status: Status::Connecting, network_supported: true, was_disconnected: false, has_context: false, perf: PerfState::default(), paused: None, log_seq: 0, net_seq: 0 }
     }
 }
 
@@ -377,6 +389,131 @@ impl RnView {
         Some(format!("⏸ PAUSED {}:{} ({})", p.file, p.line, p.reason))
     }
 
+    /// The device a control-socket query is about: the first whose key or label
+    /// contains `name`, else the active one.
+    fn query_device(&self, name: Option<&str>) -> Option<(&str, &Device)> {
+        let key = match name.map(str::to_lowercase) {
+            Some(n) => self.targets.iter().find(|t| t.key.to_lowercase().contains(&n) || t.label.to_lowercase().contains(&n)).map(|t| t.key.as_str()),
+            None => self.active.as_deref(),
+        }?;
+        self.devices.get_key_value(key).map(|(k, d)| (k.as_str(), d))
+    }
+
+    /// Connected apps, for the control socket's `status`.
+    pub fn apps_json(&self) -> serde_json::Value {
+        let apps: Vec<serde_json::Value> = self
+            .targets
+            .iter()
+            .map(|t| {
+                let d = self.devices.get(&t.key);
+                serde_json::json!({
+                    "device": t.label,
+                    "status": format!("{:?}", d.map(|d| d.status.clone()).unwrap_or(Status::Connecting)).to_lowercase(),
+                    "paused": d.and_then(|d| d.paused.as_ref()).map(|p| format!("{}:{} ({})", p.file, p.line, p.reason)),
+                    "logs": d.map_or(0, |d| d.logs.len()),
+                    "requests": d.map_or(0, |d| d.net.len()),
+                })
+            })
+            .collect();
+        serde_json::Value::Array(apps)
+    }
+
+    /// JS console entries from `since` (a seq), newest `limit` that match.
+    /// `level`: "error" = errors only, "warn" = warnings and errors.
+    pub fn logs_json(&self, device: Option<&str>, level: Option<&str>, filter: Option<&str>, since: u64, limit: usize) -> serde_json::Value {
+        let Some((key, d)) = self.query_device(device) else {
+            return serde_json::json!({ "error": "no app connected to Metro" });
+        };
+        let filter = filter.map(str::to_lowercase);
+        let first = d.log_seq - d.logs.len() as u64;
+        let mut hits: Vec<serde_json::Value> = d
+            .logs
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (first + i as u64, e))
+            .filter(|(seq, e)| {
+                *seq >= since
+                    && match level {
+                        Some("error") => e.level == "error",
+                        Some("warn") => e.level == "error" || e.level == "warn" || e.level == "warning",
+                        _ => true,
+                    }
+                    && filter.as_ref().is_none_or(|f| e.text.to_lowercase().contains(f))
+            })
+            .map(|(seq, e)| {
+                let mut v = serde_json::json!({ "seq": seq, "level": e.level, "text": truncate(&e.text, 4000) });
+                // Logged objects arrive as a preview ("Object"); include the fetched tree.
+                if let Some(tree) = &e.expanded {
+                    let mut lines: Vec<String> = tree.iter().take(60).map(|l| truncate(l, 500)).collect();
+                    if tree.len() > 60 {
+                        lines.push(format!("… {} more lines", tree.len() - 60));
+                    }
+                    v["details"] = serde_json::json!(lines);
+                }
+                if let Some(stack) = &e.stack {
+                    // Project-relative paths: shorter, and what an agent edits.
+                    let prefix = self.root.as_ref().map(|r| format!("{}/", r.trim_end_matches('/')));
+                    let own: Vec<String> = stack
+                        .iter()
+                        .filter(|l| !l.starts_with(FRAMEWORK_FRAME))
+                        .take(15)
+                        .map(|l| match &prefix {
+                            Some(p) => l.replace(p.as_str(), ""),
+                            None => l.clone(),
+                        })
+                        .collect();
+                    v["stack"] = serde_json::json!(own);
+                }
+                v
+            })
+            .collect();
+        let total = hits.len();
+        hits.drain(..total.saturating_sub(limit));
+        serde_json::json!({ "device": key, "next": d.log_seq, "matched": total, "entries": hits })
+    }
+
+    /// Network requests from `since` (a seq), newest `limit` that match.
+    pub fn net_json(&self, device: Option<&str>, failed_only: bool, filter: Option<&str>, since: u64, limit: usize) -> serde_json::Value {
+        let Some((key, d)) = self.query_device(device) else {
+            return serde_json::json!({ "error": "no app connected to Metro" });
+        };
+        let filter = filter.map(str::to_lowercase);
+        let first = d.net_seq - d.net.len() as u64;
+        let mut hits: Vec<serde_json::Value> = d
+            .net
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (first + i as u64, r))
+            .filter(|(seq, r)| {
+                *seq >= since
+                    && (!failed_only || net_error(r))
+                    && filter.as_ref().is_none_or(|f| r.url.to_lowercase().contains(f) || graphql_operation(r).is_some_and(|o| o.to_lowercase().contains(f)))
+            })
+            .map(|(seq, r)| {
+                serde_json::json!({
+                    "seq": seq,
+                    "id": r.id,
+                    "method": r.method,
+                    "url": r.url,
+                    "status": r.status,
+                    "failed": r.failed,
+                    "ms": r.duration_ms.map(|d| d.round() as i64),
+                    "graphql": graphql_operation(r),
+                })
+            })
+            .collect();
+        let total = hits.len();
+        hits.drain(..total.saturating_sub(limit));
+        serde_json::json!({ "device": key, "next": d.net_seq, "matched": total, "requests": hits })
+    }
+
+    /// One request in full (headers and bodies), as text.
+    pub fn request_text(&self, device: Option<&str>, id: &str) -> Option<String> {
+        let (_, d) = self.query_device(device)?;
+        let r = d.net.iter().find(|r| r.id == id)?;
+        Some(net_detail_lines(r).iter().map(|l| truncate(l, 20_000)).collect::<Vec<_>>().join("\n"))
+    }
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         render_view(self, frame, area);
     }
@@ -429,6 +566,7 @@ impl RnView {
             RnEvent::Log(key, e) => {
                 let d = self.dev(&key);
                 d.logs.push(e);
+                d.log_seq += 1;
                 if d.logs.len() > MAX_LINES {
                     d.logs.remove(0);
                 }
@@ -439,6 +577,7 @@ impl RnView {
                     *existing = rec;
                 } else {
                     d.net.push(rec);
+                    d.net_seq += 1;
                     if d.net.len() > MAX_NET {
                         d.net.remove(0);
                     }

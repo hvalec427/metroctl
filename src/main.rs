@@ -4,7 +4,9 @@
 //! React Native log viewer; `init`/`config` manage the project registry.
 
 mod commands_rn;
+mod control;
 mod devinfo;
+mod mcp;
 mod metro_events;
 mod proc;
 mod rn;
@@ -73,6 +75,15 @@ enum Command {
         #[arg(long = "print-ws")]
         print_ws: bool,
     },
+    /// Send one request to this checkout's running dashboard (status, logs,
+    /// errors, network, request, output, reload, rebuild, restart_metro)
+    Ctl {
+        cmd: String,
+        /// Arguments as a JSON object, e.g. '{"level":"error","limit":20}'
+        args: Option<String>,
+    },
+    /// MCP server (stdio) for coding agents, backed by this checkout's dashboard
+    Mcp,
     /// Print the bundler events of a Metro started elsewhere (dashboard helper)
     #[command(name = "metro-events", hide = true)]
     MetroEvents {
@@ -123,6 +134,13 @@ fn main() {
             commands_rn::launch(session::UpOpts { port, device, new_sim, sim_type, sim_runtime, sim_cleanup: Some(sim_cleanup), install })
         }
         Some(Command::Down { keep_sim }) => commands_rn::down(keep_sim),
+        Some(Command::Mcp) => mcp::run(),
+        Some(Command::Ctl { cmd, args }) => {
+            if let Err(e) = control::ctl(&cmd, args.as_deref()) {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+        }
         Some(Command::Init) => commands_rn::init(),
         Some(Command::Config) => commands_rn::print_config_path(),
         Some(Command::Logs { name, port, print_ws }) => logs(name, port, print_ws),

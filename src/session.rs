@@ -53,6 +53,9 @@ pub struct SessionFile {
     #[serde(default)]
     pub created_sim: bool,
     pub status: String,
+    /// Control socket (JSON lines), see `control.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<String>,
 }
 
 pub fn session_dir(root: &Path) -> PathBuf {

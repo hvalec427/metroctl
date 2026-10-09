@@ -6,13 +6,14 @@
 
 use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const SCROLLBACK: usize = 5000;
+const TEXT_TAIL: usize = 3000;
 
 pub struct PtyProcess {
     pub label: String,
@@ -30,6 +31,59 @@ pub struct PtyProcess {
     /// `pin` covers the paused-at-bottom case it doesn't).
     pub follow: bool,
     pin: usize, // scrollback length when last rendered while paused
+    text: Arc<Mutex<PlainText>>, // plain-text tail for `output` over the control socket
+}
+
+/// Output as plain lines: escape sequences dropped, `\r` rewrites collapsed
+/// (progress bars keep only their last state).
+#[derive(Default)]
+pub struct PlainText {
+    lines: VecDeque<String>,
+    cur: String,
+    esc: u8, // 0 none, 1 after ESC, 2 in CSI, 3 in OSC
+    cr: bool,
+}
+
+impl PlainText {
+    fn push(&mut self, bytes: &[u8]) {
+        for ch in String::from_utf8_lossy(bytes).chars() {
+            match (self.esc, ch) {
+                (0, '\x1b') => self.esc = 1,
+                (0, '\r') => self.cr = true,
+                (0, '\n') => {
+                    self.lines.push_back(std::mem::take(&mut self.cur));
+                    if self.lines.len() > TEXT_TAIL {
+                        self.lines.pop_front();
+                    }
+                    self.cr = false;
+                }
+                (0, c) if c == '\t' || !c.is_control() => {
+                    if self.cr {
+                        self.cur.clear();
+                        self.cr = false;
+                    }
+                    self.cur.push(c);
+                }
+                (0, _) => {}
+                (1, '[') => self.esc = 2,
+                (1, ']') => self.esc = 3,
+                (1, _) => self.esc = 0,
+                (2, c) if ('@'..='~').contains(&c) => self.esc = 0,
+                (3, '\x07') | (3, '\\') => self.esc = 0,
+                _ => {}
+            }
+        }
+    }
+
+    /// The last `n` lines (including an unfinished last line).
+    pub fn tail(&self, n: usize) -> Vec<String> {
+        let mut v: Vec<String> = self.lines.iter().cloned().collect();
+        if !self.cur.is_empty() {
+            v.push(self.cur.clone());
+        }
+        let skip = v.len().saturating_sub(n);
+        v.split_off(skip)
+    }
 }
 
 impl PtyProcess {
@@ -60,6 +114,8 @@ impl PtyProcess {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
         let alive = Arc::new(AtomicBool::new(true));
 
+        let text = Arc::new(Mutex::new(PlainText::default()));
+        let text_r = text.clone();
         let parser_r = parser.clone();
         let alive_r = alive.clone();
         std::thread::spawn(move || {
@@ -71,6 +127,9 @@ impl PtyProcess {
                     Ok(n) => {
                         if let Ok(mut p) = parser_r.lock() {
                             p.process(&buf[..n]);
+                        }
+                        if let Ok(mut t) = text_r.lock() {
+                            t.push(&buf[..n]);
                         }
                     }
                 }
@@ -91,6 +150,7 @@ impl PtyProcess {
             cols,
             follow: true,
             pin: 0,
+            text,
         })
     }
 
@@ -205,6 +265,11 @@ impl PtyProcess {
     }
 
     /// Clone handle to the parser so the renderer can read the screen.
+    /// The last `n` lines of output as plain text.
+    pub fn tail_text(&self, n: usize) -> Vec<String> {
+        self.text.lock().map(|t| t.tail(n)).unwrap_or_default()
+    }
+
     pub fn parser(&self) -> Arc<Mutex<vt100::Parser>> {
         self.parser.clone()
     }
@@ -230,6 +295,14 @@ impl Drop for PtyProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_text_strips_escapes_and_collapses_progress() {
+        let mut t = PlainText::default();
+        t.push(b"\x1b[32minfo\x1b[0m building\r\n 10%\r 50%\r100%\ndone \x1b]0;title\x07ok");
+        assert_eq!(t.tail(10), vec!["info building", "100%", "done ok"]);
+        assert_eq!(t.tail(1), vec!["done ok"]);
+    }
 
     #[test]
     fn captures_child_output_into_the_screen() {
