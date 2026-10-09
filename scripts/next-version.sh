@@ -5,7 +5,7 @@
 # Dev and nightly builds use it as their base, so they carry the upcoming version.
 set -euo pipefail
 
-LATEST=$(git tag -l 'v[0-9]*' | grep -v -e '-' | sort -V | tail -1)
+LATEST=$(git tag -l 'v[0-9]*' | { grep -v -e '-' || true; } | sort -V | tail -1)
 if [ -z "${LATEST}" ]; then
   echo "0.1.0"
   exit 0
