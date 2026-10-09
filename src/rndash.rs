@@ -128,6 +128,8 @@ pub struct DashApp {
     h_split: u16, // % width of the processes pane vs devices
     confirm_quit: bool,
     link_picker: bool, // deep-link quick-picker overlay
+    link_form: Option<LinkForm>, // values for a picked link's placeholders, or a pasted URL
+    link_values: HashMap<String, String>, // last value per placeholder name, prefilled next time
     help: Option<u16>, // `?` key-reference popup, with its scroll offset
     quit: bool,
     pinned: Option<Pinned>,     // device this session builds onto (`metroctl up`)
@@ -164,7 +166,10 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
     app.begin_setup(&setup);
     app.write_session();
     let mut terminal = ratatui::init();
+    // Pastes arrive as one event (for the link form) instead of keystrokes.
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
     let res = app.main_loop(&mut terminal);
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     let root = app.root();
     let delete = app.delete_sim_on_quit.then(|| app.pinned.as_ref().map(|p| p.udid.clone())).flatten();
@@ -367,6 +372,8 @@ impl DashApp {
             h_split: 60,
             confirm_quit: false,
             link_picker: false,
+            link_form: None,
+            link_values: HashMap::new(),
             help: None,
             quit: false,
             pinned,
@@ -546,6 +553,13 @@ impl DashApp {
                 self.metro_key(b'r', "reload");
                 json!({ "ok": true, "message": self.flash.as_ref().map(|f| f.0.clone()) })
             }
+            "deeplinks" => json!({
+                "links": self.project.deeplinks.iter().map(|d| json!({
+                    "name": d.label(),
+                    "url": d.url(),
+                    "placeholders": crate::rnconfig::link_placeholders(d.url()),
+                })).collect::<Vec<_>>(),
+            }),
             "restart_metro" => {
                 self.start_metro();
                 json!({ "ok": true, "port": self.project.metro_port() })
@@ -565,7 +579,7 @@ impl DashApp {
                 self.set_status("building");
                 json!({ "ok": true, "process": self.procs[before].label })
             }
-            _ => json!({ "error": format!("unknown command {cmd:?}"), "commands": ["status", "logs", "errors", "network", "request", "output", "reload", "rebuild", "restart_metro"] }),
+            _ => json!({ "error": format!("unknown command {cmd:?}"), "commands": ["deeplinks", "status", "logs", "errors", "network", "request", "output", "reload", "rebuild", "restart_metro"] }),
         }
     }
 
@@ -995,11 +1009,32 @@ impl DashApp {
     }
 
     /// `l` picker: open the chosen deep link on the selected (running) device.
+    /// Open configured link `idx`, asking for its placeholders' values first.
     fn open_deeplink(&mut self, idx: usize) {
-        let url = match self.project.deeplinks.get(idx) {
-            Some(d) => d.url().to_string(),
-            None => return,
+        let Some(link) = self.project.deeplinks.get(idx) else {
+            return;
         };
+        let names = crate::rnconfig::link_placeholders(link.url());
+        if !names.is_empty() {
+            let values = names.into_iter().map(|n| (n.clone(), self.link_values.get(&n).cloned().unwrap_or_default())).collect();
+            self.link_form = Some(LinkForm { title: link.label().to_string(), template: link.url().to_string(), values, field: 0 });
+            return;
+        }
+        self.open_url(link.url().to_string());
+    }
+
+    /// Text pasted into the terminal: into the link form's current field.
+    fn on_paste(&mut self, text: &str) {
+        if let Some(form) = self.link_form.as_mut() {
+            form.values[form.field].1.push_str(text.trim());
+        } else if self.input_mode {
+            if let Some(p) = self.procs.get_mut(self.proc_sel) {
+                p.write_input(text.as_bytes());
+            }
+        }
+    }
+
+    fn open_url(&mut self, url: String) {
         let dev = match self.devices.get(self.dev_sel) {
             Some(d) => d.clone(),
             None => return,
@@ -1118,10 +1153,10 @@ impl DashApp {
             }
 
             if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(k) = event::read()? {
-                    if k.kind == KeyEventKind::Press {
-                        self.on_key(k);
-                    }
+                match event::read()? {
+                    Event::Key(k) if k.kind == KeyEventKind::Press => self.on_key(k),
+                    Event::Paste(text) => self.on_paste(&text),
+                    _ => {}
                 }
             }
             if self.quit {
@@ -1160,9 +1195,47 @@ impl DashApp {
             return;
         }
 
+        if let Some(form) = self.link_form.as_mut() {
+            match key.code {
+                KeyCode::Esc => self.link_form = None,
+                _ if ctrl_c => self.link_form = None,
+                KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % form.values.len(),
+                KeyCode::BackTab | KeyCode::Up => form.field = (form.field + form.values.len() - 1) % form.values.len(),
+                KeyCode::Backspace => {
+                    form.values[form.field].1.pop();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => form.values[form.field].1.clear(),
+                KeyCode::Enter if form.field + 1 < form.values.len() => form.field += 1,
+                KeyCode::Enter => {
+                    let form = self.link_form.take().unwrap();
+                    if form.values.iter().any(|(_, v)| v.trim().is_empty()) {
+                        self.set_flash("fill in every value");
+                        self.link_form = Some(form);
+                        return;
+                    }
+                    let url = if form.template.is_empty() {
+                        form.values[0].1.trim().to_string() // a pasted URL, as is
+                    } else {
+                        for (k, v) in &form.values {
+                            self.link_values.insert(k.clone(), v.clone());
+                        }
+                        crate::rnconfig::fill_link(&form.template, &form.values)
+                    };
+                    self.open_url(url);
+                }
+                KeyCode::Char(c) => form.values[form.field].1.push(c),
+                _ => {}
+            }
+            return;
+        }
+
         if self.link_picker {
             if key.code == KeyCode::Esc {
                 self.link_picker = false;
+            } else if key.code == KeyCode::Char('/') {
+                // Any URL, e.g. a magic login link pasted from an email.
+                self.link_picker = false;
+                self.link_form = Some(LinkForm { title: "Open a URL".into(), template: String::new(), values: vec![("url".into(), String::new())], field: 0 });
             } else if let KeyCode::Char(c) = key.code {
                 if let Some(i) = picker_index(c) {
                     if i < self.project.deeplinks.len() {
@@ -1287,9 +1360,7 @@ impl DashApp {
             KeyCode::Char('s') => self.stop_selected_device(),
             KeyCode::Char('o') => self.open_selected(),
             KeyCode::Char('l') => {
-                if self.project.deeplinks.is_empty() {
-                    self.set_flash("no deeplinks in rn.json");
-                } else if self.devices.get(self.dev_sel).and_then(|d| d.open.as_ref()).is_none() {
+                if self.devices.get(self.dev_sel).and_then(|d| d.open.as_ref()).is_none() {
                     self.set_flash("start the device first (⏎)");
                 } else {
                     self.link_picker = true;
@@ -1367,6 +1438,9 @@ fn render(app: &mut DashApp, frame: &mut Frame) {
     if app.link_picker {
         render_link_picker(app, frame, area);
     }
+    if let Some(form) = &app.link_form {
+        render_link_form(form, frame, area);
+    }
     if app.help.is_some() {
         render_help(app, frame, area);
     }
@@ -1376,15 +1450,48 @@ fn render(app: &mut DashApp, frame: &mut Frame) {
     }
 }
 
+/// Values for a link's placeholders (`template` set), or one pasted URL.
+struct LinkForm {
+    title: String,
+    template: String,
+    values: Vec<(String, String)>,
+    field: usize,
+}
+
+fn render_link_form(form: &LinkForm, frame: &mut Frame, area: Rect) {
+    let w = 76.min(area.width);
+    let h = (form.values.len() as u16 * 2 + 5).min(area.height);
+    let r = centered(area, w, h);
+    frame.render_widget(Clear, r);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(format!(" {} ", form.title));
+    let inner = block.inner(r);
+    frame.render_widget(block, r);
+    let mut lines = vec![Line::raw("")];
+    let room = inner.width.saturating_sub(16) as usize;
+    for (i, (name, value)) in form.values.iter().enumerate() {
+        let active = i == form.field;
+        // Long values (tokens, magic links): show the end, where typing happens.
+        let chars: Vec<char> = value.chars().collect();
+        let shown: String = chars[chars.len().saturating_sub(room)..].iter().collect();
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {name:>12} "), if active { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) }),
+            Span::raw(if active { format!("{shown}█") } else { shown }),
+        ]));
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::styled(" type or paste · ⇥ next · ⏎ open · esc cancel", Style::default().fg(Color::DarkGray)));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
     let links = &app.project.deeplinks;
-    let h = (links.len() as u16 + 2).clamp(3, area.height);
+    let h = (links.len() as u16 + 4).clamp(4, area.height);
     let r = centered(area, 64, h);
     frame.render_widget(Clear, r);
     let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(" Deep links · esc ");
     let inner = block.inner(r);
     frame.render_widget(block, r);
-    let lines: Vec<Line> = links
+    let mut lines: Vec<Line> = links
         .iter()
         .enumerate()
         .filter_map(|(i, d)| {
@@ -1392,10 +1499,16 @@ fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
                 Line::from(vec![
                     Span::styled(format!(" {k} "), Style::default().fg(Color::Black).bg(Color::Cyan)),
                     Span::raw(format!("  {}", d.label())),
+                    Span::styled(
+                        crate::rnconfig::link_placeholders(d.url()).iter().map(|p| format!(" ‹{p}›")).collect::<String>(),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ])
             })
         })
         .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![Span::styled(" / ", Style::default().fg(Color::Black).bg(Color::Cyan)), Span::raw("  paste any URL (e.g. a magic login link)")]));
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
@@ -1431,7 +1544,7 @@ const HELP_LEFT: &[KeySection] = &[
         ("s", "stop it"),
         ("b", "build & run on it"),
         ("o", "open the app"),
-        ("l", "open a deep link"),
+        ("l", "open a deep link (fills ‹placeholders›; / for any URL)"),
     ]),
 ];
 

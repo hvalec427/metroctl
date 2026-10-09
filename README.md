@@ -125,7 +125,7 @@ Android rarely needs this — the `ANDROID_SERIAL` env pins the device regardles
 | `ios.bundleId` | no | — | App bundle id; when set, `o` delivers the link straight to the app on a **physical** iPhone instead of Safari. |
 | `android.command` | no | `<pm> run android` / `<pm> android` | Build & run command for Android. May contain `{serial}`, replaced with the selected device (usually unnecessary — `ANDROID_SERIAL` already pins it). |
 | `android.bundleId` | no | — | Application id; when set, `o` routes the link to that package instead of a browser/chooser. |
-| `deeplinks` | no | `[]` | Links for the `l` quick-picker — each a URL string or `{ "name", "url" }`. |
+| `deeplinks` | no | `[]` | Links for the `l` quick-picker — each a URL string or `{ "name", "url" }`. `<name>` / `{name}` placeholders (e.g. `laundryheap://?redirect=RC&uuid=<uuid>`) are asked for when you pick the link. |
 
 Only `name` and `root` are mandatory — and `rn init` fills both in for you.
 
@@ -173,7 +173,7 @@ Each pane owns its own keys (shown in that pane's footer); only a few are global
 | `⏎` | install & run the app on it — targets *that* device (iOS `--udid`, Android `--deviceId`); an offline sim/emulator is launched first |
 | `b` / `s` | start (boot) / stop (shut down) the selected simulator or emulator |
 | `o` | launch the app on the device by its `bundleId` |
-| `l` | pop up the `deeplinks` picker; press the number/letter beside a link to open it on the device |
+| `l` | pop up the `deeplinks` picker; press the number/letter beside a link to open it on the device (a form asks for its placeholders), or `/` to paste any URL, e.g. a magic login link |
 
 Each pane's keys show in its own footer, and only the focused pane's footer is lit
 — the others go dark so there's no clutter.
@@ -236,6 +236,7 @@ server on top of it for coding agents:
 | `logs`, `errors`, `network`, `request` | JS console, failures, requests (`since` for only new entries) |
 | `output` | last lines of a process tab (build errors) |
 | `reload`, `rebuild`, `restart_metro` | drive the session |
+| `deeplinks` | the configured deep links (open them with `touchctl open`) |
 
 To see and use the app's screen (screenshots, element tree, taps, typing,
 deep links), use [touchctl](https://github.com/hvalec427/touchctl). Point it at

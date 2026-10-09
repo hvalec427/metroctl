@@ -87,6 +87,48 @@ pub enum DeepLink {
     Named { name: String, url: String },
 }
 
+/// `<name>` / `{name}` placeholders in a link, in order, without duplicates.
+pub fn link_placeholders(url: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let b = url.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let close = match b[i] {
+            b'<' => b'>',
+            b'{' => b'}',
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let rest = &url[i + 1..];
+        match rest.find(close as char) {
+            Some(end) if end > 0 && rest[..end].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') => {
+                let name = rest[..end].to_string();
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+                i += end + 2;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Fill a link's placeholders, percent-encoding the values (they go into a URL).
+pub fn fill_link(url: &str, values: &[(String, String)]) -> String {
+    let mut s = url.to_string();
+    for (k, v) in values {
+        let enc: String = v
+            .bytes()
+            .map(|c| if c.is_ascii_alphanumeric() || b"-._~".contains(&c) { (c as char).to_string() } else { format!("%{c:02X}") })
+            .collect();
+        s = s.replace(&format!("<{k}>"), &enc).replace(&format!("{{{k}}}"), &enc);
+    }
+    s
+}
+
 impl DeepLink {
     pub fn url(&self) -> &str {
         match self {
@@ -389,6 +431,14 @@ mod tests {
         assert_eq!(hit.name, "outer");
         // Component-wise prefix: /dev must not match /development.
         assert!(project_for_dir(&cfg, Path::new("/Users/me/development")).is_none());
+    }
+
+    #[test]
+    fn link_placeholders_fill() {
+        let u = "laundryheap://?redirect=RC&uuid=<uuid>&t={token}&again=<uuid>";
+        assert_eq!(link_placeholders(u), vec!["uuid", "token"]);
+        assert_eq!(fill_link(u, &[("uuid".into(), "ab-12".into()), ("token".into(), "x+y=".into())]), "laundryheap://?redirect=RC&uuid=ab-12&t=x%2By%3D&again=ab-12");
+        assert!(link_placeholders("laundryheap://booking?country=auto").is_empty());
     }
 
     #[test]

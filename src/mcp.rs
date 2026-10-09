@@ -90,6 +90,7 @@ fn tools() -> Value {
         { "name": "reload", "description": "Reload the app's JS bundle.", "inputSchema": obj(json!({})) },
         { "name": "rebuild", "description": "Rebuild and reinstall the native app on the session's simulator (needed after native changes). Waits for the result.",
           "inputSchema": obj(json!({ "wait": { "type": "boolean", "description": "Wait for the build to finish (default true)" } })) },
+        { "name": "deeplinks", "description": "The app's deep links from the project config. Fill <placeholders> (e.g. a uuid or token from the task) and open one with `touchctl open <url>`.", "inputSchema": obj(json!({})) },
         { "name": "restart_metro", "description": "Restart Metro (e.g. after changing metro.config.js or installing JS deps).", "inputSchema": obj(json!({})) },
     ])
 }
@@ -134,6 +135,11 @@ fn call_tool(name: &str, a: &Value) -> Result<Vec<Value>> {
         "reload" => {
             let v = ask("reload", json!({}))?;
             Ok(text(v["message"].as_str().unwrap_or("reloaded").to_string()))
+        }
+        "deeplinks" => {
+            let v = ask("deeplinks", json!({}))?;
+            let links: Vec<String> = v["links"].as_array().into_iter().flatten().map(|l| format!("{}: {}", l["name"].as_str().unwrap_or(""), l["url"].as_str().unwrap_or(""))).collect();
+            Ok(text(if links.is_empty() { "(no deep links configured)".into() } else { links.join("\n") }))
         }
         "restart_metro" => {
             ask("restart_metro", json!({}))?;
