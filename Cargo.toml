@@ -24,6 +24,7 @@ crossterm = "0.28"
 portable-pty = "0.8"
 vt100 = "0.15"
 sourcemap = "9"
+signal-hook = "0.3"
 
 [profile.release]
 strip = true

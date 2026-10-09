@@ -2,11 +2,13 @@
 //! No subcommand launches the dashboard TUI; `init` registers the current
 //! directory; `config` prints the config path.
 
+use crate::rndash::Setup;
+use crate::session::{self, Pinned, SimCleanup, UpOpts};
 use crate::rnconfig::{current_project, load_rn_config, rn_config_path, save_rn_config, ProjectConfig, RnConfig};
 use inquire::Text;
 
 /// `metroctl` — launch the dashboard for the current project.
-pub fn launch() {
+pub fn launch(opts: UpOpts) {
     let cfg = match load_rn_config() {
         Ok(Some(c)) => c,
         Ok(None) => {
@@ -18,16 +20,55 @@ pub fn launch() {
             std::process::exit(1);
         }
     };
-    let project = match current_project(&cfg) {
-        Some(p) => p.clone(),
+    let mut project = match current_project(&cfg) {
+        Some(p) => p,
         None => {
             eprintln!("This directory isn't a registered React Native project.");
             eprintln!("Run `metroctl init` here to add it.");
             std::process::exit(1);
         }
     };
-    if let Err(e) = crate::rndash::run(project) {
+    let setup = match prepare(&mut project, &opts) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e:#}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = crate::rndash::run(project, setup) {
         eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+/// Apply `up` options before the dashboard opens: the port override and the
+/// device to pin (creating a simulator if asked).
+fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> {
+    match opts.port {
+        Some(Some(p)) => project.set_metro_port(p),
+        Some(None) => project.set_metro_port(session::free_port(project.metro_port())?),
+        None => {}
+    }
+    let cleanup = opts.sim_cleanup.unwrap_or(SimCleanup::Ask);
+    let pinned = if let Some(name) = &opts.new_sim {
+        let name = name.clone().unwrap_or_else(|| session::default_sim_name(std::path::Path::new(&project.root)));
+        eprintln!("creating simulator {name}…");
+        let (udid, desc) = session::create_simulator(&name, opts.sim_runtime.as_deref(), opts.sim_type.as_deref())?;
+        eprintln!("created {desc} ({udid})");
+        Some(Pinned { udid, created: true, simulator: true, cleanup })
+    } else {
+        opts.device.as_ref().map(|udid| Pinned { udid: udid.clone(), created: false, simulator: session::sim_state(udid).is_some(), cleanup })
+    };
+    let up = opts.port.is_some() || pinned.is_some() || opts.install;
+    Ok(Setup { pinned, install: opts.install, start: up })
+}
+
+/// `metroctl down` — stop the session running in this checkout.
+pub fn down(keep_sim: bool) {
+    let root = load_rn_config().ok().flatten().and_then(|c| current_project(&c)).map(|p| std::path::PathBuf::from(p.root));
+    let root = root.or_else(|| std::env::current_dir().ok()).unwrap();
+    if let Err(e) = session::down(&root, keep_sim) {
+        eprintln!("{e:#}");
         std::process::exit(1);
     }
 }

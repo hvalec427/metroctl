@@ -11,6 +11,8 @@ metroctl init     # register the current directory as a project
 metroctl          # open the dashboard for the current project
 metroctl config   # print the config file path
 metroctl logs     # just the React Native log viewer (see docs/logs.md)
+metroctl up …     # dashboard set up for this checkout (port, simulator, build)
+metroctl down     # stop the `up` session in this checkout
 ```
 
 ## Install
@@ -183,6 +185,33 @@ falls back to a CDP reload when Metro isn't running under simon).
 > **Dev-only, macOS.** The JS feed needs Metro running; booting simulators and
 > the app-presence checks use the same `xcrun`/`adb` tooling as the rest of simon.
 > Foreground detection is Android-only; iOS can't report it over these tools.
+
+## Isolated sessions (`up` / `down`)
+
+`metroctl up` opens the dashboard and gets the app running on its own port and
+simulator, so several checkouts (e.g. git worktrees) can run side by side:
+
+```sh
+metroctl up --port auto --new-sim     # free port, new simulator, Metro, build
+metroctl up --port 8090 --device <udid>
+metroctl down                         # from another shell: stop it, delete its simulator
+```
+
+- `--port auto` picks the first free port from the configured one, skipping
+  ports other sessions have claimed. The port reaches the build through
+  `RCT_METRO_PORT`, so each app talks to its own Metro.
+- `--new-sim [NAME]` creates a simulator (default `metroctl-<dir>`) using the
+  newest iOS runtime and the newest plain iPhone. Override them with
+  `--sim-type "iPhone 16 Pro"` / `--sim-runtime 18.2`. On quit, metroctl asks
+  whether to delete it (`--sim-cleanup ask|delete|keep`).
+- `--install` installs JS deps and pods first.
+- Steps run in order: install and simulator boot run in parallel, then Metro
+  starts, then the build runs once Metro answers. Each step gets its own
+  process tab.
+- In a git worktree of a registered project, metroctl uses that project's
+  config with its root moved into the worktree. No `init` is needed.
+- The running session is described in `.metroctl/session.json` (pid, port,
+  udid, status), which is git-excluded.
 
 ## Contributing
 

@@ -12,6 +12,7 @@ use crate::proc::PtyProcess;
 use crate::rnclient::{ConnCmd, RnClient};
 use crate::rnconfig::{PackageManager, ProjectConfig};
 use crate::rnview::RnView;
+use crate::session::{self, Pinned, SessionFile, SimCleanup};
 use simon::devices::{get_all_installed, get_all_running, InstalledDevice, Platform, RunningDevice};
 use simon::{android, ios};
 use anyhow::Result;
@@ -20,7 +21,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -66,16 +69,20 @@ struct DeviceRow {
     foreground: Option<bool>,
     detail: Option<String>,  // OS version, API level, connection…
     problem: Option<String>, // why it can't be used yet (unauthorized, Developer Mode off…)
+    pinned: bool,            // the device this session (`metroctl up`) builds onto
 }
 
 impl DeviceRow {
     /// Section in the Devices pane (also the sort order).
     fn group(&self) -> (u8, &'static str) {
+        if self.pinned {
+            return (0, "This session");
+        }
         match (self.platform, self.boot.is_some()) {
-            (Platform::Ios, true) => (0, "iOS Simulators"),
-            (Platform::Ios, false) => (1, "iOS Devices"),
-            (Platform::Android, true) => (2, "Android Emulators"),
-            (Platform::Android, false) => (3, "Android Devices"),
+            (Platform::Ios, true) => (1, "iOS Simulators"),
+            (Platform::Ios, false) => (2, "iOS Devices"),
+            (Platform::Android, true) => (3, "Android Emulators"),
+            (Platform::Android, false) => (4, "Android Devices"),
         }
     }
 
@@ -121,24 +128,61 @@ pub struct DashApp {
     link_picker: bool, // deep-link quick-picker overlay
     help: Option<u16>, // `?` key-reference popup, with its scroll offset
     quit: bool,
+    pinned: Option<Pinned>,     // device this session builds onto (`metroctl up`)
+    setup: Option<SetupRun>,    // `metroctl up` steps still in progress
+    status: String,             // session status, mirrored to .metroctl/session.json
+    term: Arc<AtomicBool>,      // SIGTERM/SIGHUP received (e.g. `metroctl down`)
+    delete_sim_on_quit: bool,
+    sim_builds: Vec<(usize, String)>, // iOS simulator build tabs → udid, to point the app at our port
 }
 
-pub fn run(project: ProjectConfig) -> Result<()> {
-    let mut app = DashApp::new(project);
+/// What `metroctl up` asked for, applied once the dashboard opens.
+pub struct Setup {
+    pub pinned: Option<Pinned>,
+    pub install: bool,
+    pub start: bool, // start Metro and build onto the pinned device
+}
+
+/// Process tabs of the setup steps; `None` = step not needed.
+struct SetupRun {
+    install: Option<usize>,
+    boot: Option<usize>,
+    build: Option<usize>,
+    metro_started: bool,
+}
+
+pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
+    let mut app = DashApp::new(project, setup.pinned.clone());
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+        let _ = signal_hook::flag::register(sig, app.term.clone());
+    }
     app.attach_external_metro();
+    app.begin_setup(&setup);
+    app.write_session();
     let mut terminal = ratatui::init();
     let res = app.main_loop(&mut terminal);
     ratatui::restore();
+    let root = app.root();
+    let delete = app.delete_sim_on_quit.then(|| app.pinned.as_ref().map(|p| p.udid.clone())).flatten();
+    drop(app); // stops Metro and the other processes
+    session::remove_session(&root);
+    if let Some(udid) = delete {
+        eprintln!("deleting simulator {udid}…");
+        if let Err(e) = session::delete_simulator(&udid) {
+            eprintln!("{e}");
+        }
+    }
     res
 }
 
 impl DashApp {
-    fn new(project: ProjectConfig) -> DashApp {
+    fn new(project: ProjectConfig, pinned: Option<Pinned>) -> DashApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let client = RnClient::start(project.metro_port());
         // Background device poller — simctl/adb are slow, so keep them off the UI thread.
         let dev_tx = tx.clone();
         let android_bundle = project.android_bundle_id().map(String::from);
+        let pinned_udid = pinned.as_ref().map(|p| p.udid.clone());
         std::thread::spawn(move || {
             // devicectl is slow; refresh the iPhone details less often than the list.
             let mut ios_details: HashMap<String, devinfo::IosDetail> = HashMap::new();
@@ -192,6 +236,7 @@ impl DashApp {
                             foreground: None,
                             detail: None, // the runtime is already in the label
                             problem: None,
+                            pinned: false,
                         },
                         InstalledDevice::AndroidAvd { name, .. } => {
                             let serial = if running { android_serial(name) } else { None };
@@ -210,6 +255,7 @@ impl DashApp {
                                 foreground,
                                 detail,
                                 problem: None,
+                                pinned: false,
                             }
                         }
                     };
@@ -230,6 +276,7 @@ impl DashApp {
                                 foreground: None,
                                 detail: extra.map(|e| e.text.clone()).filter(|t| !t.is_empty()),
                                 problem: extra.and_then(|e| e.problem.clone()),
+                                pinned: false,
                             });
                         }
                         RunningDevice::AndroidPhysical { serial, .. } => {
@@ -244,6 +291,7 @@ impl DashApp {
                                 foreground,
                                 detail: devinfo::android_running(serial, true),
                                 problem: None,
+                                pinned: false,
                             });
                         }
                         _ => {}
@@ -261,9 +309,14 @@ impl DashApp {
                         foreground: None,
                         detail: None,
                         problem: Some(problem),
+                        pinned: false,
                     });
                 }
-                // Group as the pane shows them: iOS sims, iPhones, Android emulators, phones.
+                for r in &mut rows {
+                    r.pinned = pinned_udid.is_some() && r.ios_udid() == pinned_udid;
+                }
+                // Group as the pane shows them: this session's device, iOS sims,
+                // iPhones, Android emulators, phones.
                 rows.sort_by_key(|r| r.group());
                 if dev_tx.send(DashMsg::Devices(rows)).is_err() {
                     break;
@@ -296,7 +349,173 @@ impl DashApp {
             link_picker: false,
             help: None,
             quit: false,
+            pinned,
+            setup: None,
+            status: "ready".into(),
+            term: Arc::new(AtomicBool::new(false)),
+            delete_sim_on_quit: false,
+            sim_builds: Vec::new(),
         }
+    }
+
+    /// Kick off `metroctl up`: install deps and boot the pinned simulator (in
+    /// parallel), then Metro, then the build — driven by `advance_setup`.
+    fn begin_setup(&mut self, setup: &Setup) {
+        if !setup.start {
+            return;
+        }
+        let install = if setup.install { self.spawn_proc("Install", &self.project.install_command()) } else { None };
+        let boot = match &self.pinned {
+            Some(p) if p.simulator && session::sim_state(&p.udid).as_deref() != Some("Booted") => {
+                let cmd = session::boot_command(&p.udid);
+                self.spawn_proc("Simulator", &cmd)
+            }
+            _ => None,
+        };
+        if setup.install && install.is_none() {
+            return self.set_status("install_failed");
+        }
+        self.setup = Some(SetupRun { install, boot, build: None, metro_started: false });
+        self.advance_setup();
+    }
+
+    /// `Some(true)` = finished OK (or not needed), `Some(false)` = failed, `None` = running.
+    fn step_result(&self, idx: Option<usize>) -> Option<bool> {
+        match idx {
+            None => Some(true),
+            Some(i) => match self.procs.get(i) {
+                Some(p) => p.exit_code().map(|c| c == 0),
+                None => Some(false),
+            },
+        }
+    }
+
+    fn advance_setup(&mut self) {
+        let Some(s) = &self.setup else {
+            return;
+        };
+        let (install, boot, build, metro_started) = (s.install, s.boot, s.build, s.metro_started);
+        let (install, boot) = (self.step_result(install), self.step_result(boot));
+        let fail = |app: &mut DashApp, status: &str, msg: &str| {
+            app.setup = None;
+            app.set_status(status);
+            app.set_flash(msg.to_string());
+        };
+        if install == Some(false) {
+            return fail(self, "install_failed", "install failed — see the Install tab");
+        }
+        if boot == Some(false) {
+            return fail(self, "boot_failed", "simulator failed to boot — see the Simulator tab");
+        }
+        if install == Some(true) && !metro_started {
+            let ours = self.metro_idx.is_some_and(|i| !self.metro_external && self.procs.get(i).is_some_and(|p| p.is_alive()));
+            if !ours {
+                self.start_metro();
+            }
+            if let Some(s) = self.setup.as_mut() {
+                s.metro_started = true;
+            }
+        }
+        if install.is_none() {
+            return self.set_status("installing");
+        }
+        if boot.is_none() {
+            return self.set_status("booting");
+        }
+        let Some(build) = build else {
+            // run-ios opens its own Metro in a new Terminal if none answers on the port yet.
+            if !metro_events::port_in_use(self.project.metro_port()) {
+                return self.set_status("starting_metro");
+            }
+            let Some(udid) = self.pinned.as_ref().map(|p| p.udid.clone()) else {
+                self.setup = None;
+                return self.set_status("ready");
+            };
+            let before = self.procs.len();
+            self.run_platform(false, Some(udid));
+            if self.procs.len() == before {
+                return fail(self, "build_failed", "couldn't start the build");
+            }
+            if let Some(s) = self.setup.as_mut() {
+                s.build = Some(before);
+            }
+            return self.set_status("building");
+        };
+        match self.step_result(Some(build)) {
+            None => {}
+            Some(true) => {
+                self.setup = None;
+                self.set_status("running");
+            }
+            Some(false) => fail(self, "build_failed", "build failed — see the iOS tab"),
+        }
+    }
+
+    fn is_simulator(&self, udid: &str) -> bool {
+        self.devices.iter().any(|d| matches!(&d.boot, Some(BootTarget::IosSim(u)) if u == udid))
+            || self.pinned.as_ref().is_some_and(|p| p.simulator && p.udid == udid)
+    }
+
+    /// Once an iOS simulator build succeeds, make the app load from our Metro
+    /// port. The port in the build (`RCT_METRO_PORT`) is ignored when React
+    /// Native ships prebuilt, so set the app's `RCT_jsLocation` on that
+    /// simulator and relaunch it.
+    fn finish_sim_builds(&mut self) {
+        let done: Vec<(usize, String, bool)> = self
+            .sim_builds
+            .iter()
+            .filter_map(|(i, u)| self.procs.get(*i).and_then(|p| p.exit_code()).map(|c| (*i, u.clone(), c == 0)))
+            .collect();
+        if done.is_empty() {
+            return;
+        }
+        self.sim_builds.retain(|(i, _)| !done.iter().any(|(d, _, _)| d == i));
+        let Some(bundle) = self.project.ios_bundle_id().map(String::from) else {
+            return;
+        };
+        let port = self.project.metro_port();
+        for (_, udid, _) in done.into_iter().filter(|d| d.2) {
+            let (tx, bundle) = (self.tx.clone(), bundle.clone());
+            std::thread::spawn(move || {
+                let msg = match session::point_app_at_port(&udid, &bundle, port) {
+                    Ok(true) => format!("app relaunched on Metro :{port}"),
+                    Ok(false) => return,
+                    Err(e) => format!("couldn't point the app at :{port}: {e}"),
+                };
+                let _ = tx.send(DashMsg::Flash(msg));
+            });
+        }
+    }
+
+    fn set_status(&mut self, status: &str) {
+        if self.status != status {
+            self.status = status.to_string();
+            self.write_session();
+        }
+    }
+
+    fn write_session(&self) {
+        session::write_session(
+            &self.root(),
+            &SessionFile {
+                pid: std::process::id(),
+                root: self.project.root.clone(),
+                port: self.project.metro_port(),
+                udid: self.pinned.as_ref().map(|p| p.udid.clone()),
+                created_sim: self.pinned.as_ref().is_some_and(|p| p.created),
+                status: self.status.clone(),
+            },
+        );
+    }
+
+    /// The created simulator to offer deleting on quit (cleanup = ask).
+    fn ask_delete_sim(&self) -> bool {
+        self.pinned.as_ref().is_some_and(|p| p.created && p.cleanup == SimCleanup::Ask)
+    }
+
+    fn request_quit(&mut self, delete_sim: bool) {
+        self.delete_sim_on_quit = delete_sim || self.pinned.as_ref().is_some_and(|p| p.created && p.cleanup == SimCleanup::Delete);
+        self.quit = true;
     }
 
     fn root(&self) -> PathBuf {
@@ -450,6 +669,9 @@ impl DashApp {
             }
         }
         if let Some(i) = self.spawn_proc_env(label, &cmd, env) {
+            if let Some(udid) = id.filter(|u| !android && self.is_simulator(u)) {
+                self.sim_builds.push((i, udid));
+            }
             self.proc_sel = i;
             self.focus = Pane::Processes;
             self.set_flash(format!("running: {cmd}"));
@@ -564,7 +786,23 @@ impl DashApp {
             self.set_flash(format!("{} is still running — stop it first (x)", p.label));
             return;
         }
+        self.advance_setup(); // settle setup steps before their tab indices shift
+        self.finish_sim_builds();
         let label = self.procs.remove(i).label.clone();
+        self.sim_builds.retain_mut(|(b, _)| {
+            if *b > i {
+                *b -= 1;
+            }
+            *b != i
+        });
+        if let Some(s) = self.setup.as_mut() {
+            for idx in [&mut s.install, &mut s.boot, &mut s.build] {
+                *idx = match *idx {
+                    Some(m) if m > i => Some(m - 1),
+                    other => other,
+                };
+            }
+        }
         self.metro_idx = match self.metro_idx {
             Some(m) if m == i => {
                 self.metro_external = false;
@@ -727,6 +965,13 @@ impl DashApp {
                 }
             }
 
+            self.advance_setup();
+            self.finish_sim_builds();
+            if self.term.load(Ordering::Relaxed) {
+                // `metroctl down` / window closed: quit; `down` handles the simulator.
+                return Ok(());
+            }
+
             terminal.draw(|f| render(self, f))?;
 
             // Keep every PTY sized to the pane (no-op when unchanged).
@@ -755,8 +1000,9 @@ impl DashApp {
         // Quit confirmation popup swallows all input until answered.
         if self.confirm_quit {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.quit = true,
-                _ if ctrl_c => self.quit = true, // Ctrl-C again = force quit
+                KeyCode::Char('d') if self.ask_delete_sim() => self.request_quit(true),
+                KeyCode::Char('y') | KeyCode::Char('k') | KeyCode::Enter => self.request_quit(false),
+                _ if ctrl_c => self.request_quit(false), // Ctrl-C again = force quit
                 KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => self.confirm_quit = false,
                 _ => {}
             }
@@ -989,7 +1235,8 @@ fn render(app: &mut DashApp, frame: &mut Frame) {
         render_help(app, frame, area);
     }
     if app.confirm_quit {
-        render_quit_popup(frame, area);
+        let sim = app.ask_delete_sim().then(|| app.devices.iter().find(|d| d.pinned).map(|d| d.label.clone()).unwrap_or_else(|| "the simulator".into()));
+        render_quit_popup(frame, area, sim);
     }
 }
 
@@ -1136,7 +1383,30 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
 }
 
-fn render_quit_popup(frame: &mut Frame, area: Rect) {
+fn render_quit_popup(frame: &mut Frame, area: Rect, created_sim: Option<String>) {
+    if let Some(sim) = created_sim {
+        let r = centered(area, 64, 6);
+        frame.render_widget(Clear, r);
+        let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit metroctl? ");
+        let inner = block.inner(r);
+        frame.render_widget(block, r);
+        let lines = vec![
+            Line::raw(""),
+            Line::from(Span::raw("  This stops Metro and any running builds.")),
+            Line::from(Span::raw(format!("  This session created {sim}."))),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("d", Style::default().fg(Color::Red)),
+                Span::raw(" quit, delete it  "),
+                Span::styled("k/⏎", Style::default().fg(Color::Green)),
+                Span::raw(" quit, keep it  "),
+                Span::styled("esc", Style::default().fg(Color::Cyan)),
+                Span::raw(" cancel"),
+            ]),
+        ];
+        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+        return;
+    }
     let r = centered(area, 50, 5);
     frame.render_widget(Clear, r); // wipe whatever's underneath
     let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit metroctl? ");
