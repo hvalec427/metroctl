@@ -106,6 +106,12 @@ impl DeepLink {
 /// the dashboard's Devices pane, not pinned here. `bundle_id` is the app's
 /// bundle id (iOS) / application id (Android), used to open links straight in
 /// the app rather than a browser.
+///
+/// `command` may contain a `{udid}` (iOS) / `{serial}` (Android) placeholder,
+/// substituted with the selected device so it lands in the right spot — e.g.
+/// `"react-native run-ios --udid {udid} --scheme Foo -- --reset-cache"`. Without
+/// a placeholder metroctl appends `--udid`/`--deviceId`, which a `-- …`
+/// passthrough in the script would send to the wrong side.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlatformConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]

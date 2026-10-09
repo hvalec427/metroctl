@@ -320,26 +320,33 @@ impl DashApp {
         }
     }
 
-    fn run_platform(&mut self, android: bool, device_flag: Option<String>, serial: Option<String>) {
+    fn run_platform(&mut self, android: bool, id: Option<String>) {
         let (label, mut cmd) = if android {
             ("Android", self.project.android_command())
         } else {
             ("iOS", self.project.ios_command())
         };
-        // Target the highlighted device, unless the command already names one.
-        if let Some(args) = device_flag {
+        // Preferred targeting: a `{udid}` (iOS) / `{serial}` (Android) placeholder
+        // in the configured command, so it lands exactly where the user wants —
+        // e.g. before a `-- ...` passthrough. Otherwise best-effort append (works
+        // for a plain `run-ios`, but a `--` in the script sends it to the wrong
+        // side, so iOS also relies on the target already being booted; see below).
+        let placeholder = if android { "{serial}" } else { "{udid}" };
+        if cmd.contains(placeholder) {
+            cmd = cmd.replace(placeholder, id.as_deref().unwrap_or(""));
+        } else if let Some(ref id) = id {
+            let flag = if android { format!("--deviceId {id}") } else { format!("--udid {id}") };
             let already = ["--udid", "--device", "--simulator", "--deviceId"].iter().any(|f| cmd.contains(f));
             if !already {
-                // npm needs `--` to forward args to the script; yarn/pnpm don't.
                 let sep = if self.project.package_manager() == PackageManager::Npm { " -- " } else { " " };
-                cmd = format!("{cmd}{sep}{args}");
+                cmd = format!("{cmd}{sep}{flag}");
             }
         }
         // Android: also pin the device via ANDROID_SERIAL so adb (install +
         // launch, under gradle) can't pick a different connected device.
         let mut env = self.project.command_env();
         if android {
-            if let Some(s) = &serial {
+            if let Some(s) = &id {
                 env.insert("ANDROID_SERIAL".to_string(), s.clone());
             }
         }
@@ -365,25 +372,17 @@ impl DashApp {
         if !dev.running {
             if let Some(target) = dev.boot.clone() {
                 self.boot_target(target, dev.label.clone());
-            }
-            // Android's adb serial only exists once the emulator is running —
-            // without it the build would target whatever device adb defaults to
-            // (the wrong one). So boot now and have the user re-run once it's up.
-            // iOS can target by udid even before boot, so it proceeds.
-            if android {
-                self.set_flash("emulator starting — press ⏎ again once it shows running");
+                // Don't build yet: a sim/emulator that isn't up makes run-ios /
+                // run-android fall back to "first available" — the wrong device.
+                // Boot now; build on the next ⏎ once it shows ● running.
+                let what = if android { "emulator" } else { "simulator" };
+                self.set_flash(format!("{what} starting — press ⏎ again once it shows ● running"));
                 return;
             }
         }
-        // Target this exact device: iOS by udid; Android by adb serial (+ the
-        // ANDROID_SERIAL env, set in run_platform).
-        let serial = dev.android_serial();
-        let device_flag = if android {
-            serial.as_ref().map(|s| format!("--deviceId {s}"))
-        } else {
-            dev.ios_udid().map(|u| format!("--udid {u}"))
-        };
-        self.run_platform(android, device_flag, serial);
+        // Target this exact device: iOS by udid, Android by adb serial.
+        let id = if android { dev.android_serial() } else { dev.ios_udid() };
+        self.run_platform(android, id);
     }
 
     /// Start (boot) the highlighted simulator/emulator.
