@@ -5,18 +5,12 @@ set -euo pipefail
 
 REPO="hvalec427/metroctl"
 
-# Base = next minor above the latest stable, so nightlies sort ahead of stable.
+# Base = the version the next stable release will get; LATEST is for notes.
 # Authenticated: Actions runners share IPs and hit the anonymous rate limit (403).
 LATEST=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
   "https://api.github.com/repos/$REPO/releases/latest" \
   | grep '"tag_name"' | head -1 | cut -d'"' -f4 | sed 's/^v//')
-if [ -n "${LATEST:-}" ]; then
-  MAJOR=$(echo "$LATEST" | cut -d. -f1)
-  MINOR=$(echo "$LATEST" | cut -d. -f2)
-  BASE="${MAJOR}.$((MINOR + 1)).0"
-else
-  BASE="0.1.0"
-fi
+BASE=$(bash scripts/next-version.sh)
 
 # Previous nightly = highest date suffix.
 TS=$(date -u +%Y%m%d)

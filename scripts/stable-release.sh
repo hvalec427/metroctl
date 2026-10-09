@@ -11,13 +11,8 @@ if [ -n "${LATEST:-}" ]; then
     echo "HEAD is already released as v${LATEST} — skipping."
     exit 0
   fi
-  MAJOR=$(echo "$LATEST" | cut -d. -f1)
-  MINOR=$(echo "$LATEST" | cut -d. -f2)
-  PATCH=$(echo "$LATEST" | cut -d. -f3)
-  VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-else
-  VERSION="0.1.0"
 fi
+VERSION=$(bash scripts/next-version.sh)
 TAG="v${VERSION}"
 
 echo "Building stable ${TAG} (previous: ${LATEST:-none})"

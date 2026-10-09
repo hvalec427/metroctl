@@ -6,16 +6,8 @@ set -euo pipefail
 
 REPO="hvalec427/metroctl"
 
-# Base = next minor above the latest stable (same scheme as nightly), or 0.1.0
-# if there is none yet.
-LATEST=$(gh release list --repo "$REPO" --exclude-pre-releases --limit 1 2>/dev/null | awk 'NR==1{print $1}' | sed 's/^v//')
-if [ -n "${LATEST:-}" ]; then
-  MAJOR=$(echo "$LATEST" | cut -d. -f1)
-  MINOR=$(echo "$LATEST" | cut -d. -f2)
-  BASE="${MAJOR}.$((MINOR + 1)).0"
-else
-  BASE="0.1.0"
-fi
+# Base = the version the next stable release will get.
+BASE=$(bash scripts/next-version.sh)
 
 TS=$(date -u +%Y%m%d%H%M%S)
 VERSION="${BASE}-dev.${TS}"
