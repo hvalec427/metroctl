@@ -183,3 +183,13 @@ falls back to a CDP reload when Metro isn't running under simon).
 > **Dev-only, macOS.** The JS feed needs Metro running; booting simulators and
 > the app-presence checks use the same `xcrun`/`adb` tooling as the rest of simon.
 > Foreground detection is Android-only; iOS can't report it over these tools.
+
+## Contributing
+
+Commits must follow [Conventional Commits](https://www.conventionalcommits.org)
+(`feat: …`, `fix(rn): …`) — release versions are derived from them. Enable the
+local check once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```

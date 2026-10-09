@@ -21,6 +21,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Every commit pushed to develop must be conventional: versions are derived
+  # from them (scripts/next-version.sh). master only receives develop's commits.
+  commitlint:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check conventional commits
+        run: bash scripts/commit-lint.sh "${{ github.event.before }}..${{ github.sha }}"
+
   # Scheduled runs always use the workflow file on the default branch (master),
   # which lags develop. This job only re-dispatches the workflow on develop, so
   # the nightly build runs develop's own definition.
