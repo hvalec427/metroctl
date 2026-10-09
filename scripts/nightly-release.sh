@@ -17,7 +17,7 @@ TS=$(date -u +%Y%m%d)
 TAG="v${BASE}-nightly.${TS}"
 # Sort on the 8-digit date prefix first: older nightlies used 14-digit
 # timestamps, which would otherwise always sort above plain dates.
-PREV=$(git tag -l 'v*-nightly.*' | grep -vx -e "${TAG}" | sort -t. -k4.1,4.8n -k4,4n | tail -1)
+PREV=$(git tag -l 'v*-nightly.*' | { grep -vx -e "${TAG}" || true; } | sort -t. -k4.1,4.8n -k4,4n | tail -1)
 [ -z "${PREV}" ] && PREV="${LATEST:+v$LATEST}"
 
 # Skip when nothing that affects the binary changed since the last nightly.
