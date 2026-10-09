@@ -6,13 +6,13 @@ set -euo pipefail
 
 REPO="hvalec427/metroctl"
 
-# Base = next patch above the latest stable tag, or 0.1.0 if there is none yet.
+# Base = next minor above the latest stable (same scheme as nightly), or 0.1.0
+# if there is none yet.
 LATEST=$(gh release list --repo "$REPO" --exclude-pre-releases --limit 1 2>/dev/null | awk 'NR==1{print $1}' | sed 's/^v//')
 if [ -n "${LATEST:-}" ]; then
   MAJOR=$(echo "$LATEST" | cut -d. -f1)
   MINOR=$(echo "$LATEST" | cut -d. -f2)
-  PATCH=$(echo "$LATEST" | cut -d. -f3)
-  BASE="${MAJOR}.${MINOR}.$((PATCH + 1))"
+  BASE="${MAJOR}.$((MINOR + 1)).0"
 else
   BASE="0.1.0"
 fi
