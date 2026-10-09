@@ -4,6 +4,8 @@
 //! React Native log viewer; `init`/`config` manage the project registry.
 
 mod commands_rn;
+mod devinfo;
+mod metro_events;
 mod proc;
 mod rn;
 mod rnclient;
@@ -39,6 +41,12 @@ enum Command {
         #[arg(long = "print-ws")]
         print_ws: bool,
     },
+    /// Print the bundler events of a Metro started elsewhere (dashboard helper)
+    #[command(name = "metro-events", hide = true)]
+    MetroEvents {
+        #[arg(long, default_value_t = 8081)]
+        port: u16,
+    },
     /// Check whether a newer version of metroctl is available
     #[command(name = "check-update")]
     CheckUpdate {
@@ -70,6 +78,7 @@ fn main() {
         Some(Command::Init) => commands_rn::init(),
         Some(Command::Config) => commands_rn::print_config_path(),
         Some(Command::Logs { name, port, print_ws }) => logs(name, port, print_ws),
+        Some(Command::MetroEvents { port }) => metro_events::watch(port),
         Some(Command::CheckUpdate { stable, nightly, dev }) => update::check_update(stable, nightly, dev),
         Some(Command::Update { stable, nightly, dev, force }) => update::update(stable, nightly, dev, force),
     }

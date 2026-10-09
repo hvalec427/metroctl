@@ -6,6 +6,8 @@
 //! reload/dev-menu, quit). The Metro PTY takes raw-key passthrough in input mode,
 //! so `r`/`d`/`j` and anything else Metro supports work as in a normal terminal.
 
+use crate::devinfo;
+use crate::metro_events;
 use crate::proc::PtyProcess;
 use crate::rnclient::{ConnCmd, RnClient};
 use crate::rnconfig::{PackageManager, ProjectConfig};
@@ -16,7 +18,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -62,6 +64,8 @@ struct DeviceRow {
     open: Option<OpenTarget>,
     installed: Option<bool>,
     foreground: Option<bool>,
+    detail: Option<String>,  // OS version, API level, connection…
+    problem: Option<String>, // why it can't be used yet (unauthorized, Developer Mode off…)
 }
 
 impl DeviceRow {
@@ -91,6 +95,7 @@ pub struct DashApp {
     proc_sel: usize,
     proc_scroll: usize, // scrollback offset for the focused process (0 = live)
     metro_idx: Option<usize>,
+    metro_external: bool, // metro_idx is a watcher tab for a Metro started outside metroctl
     client: RnClient,
     rnview: RnView,
     focus: Pane,
@@ -110,6 +115,7 @@ pub struct DashApp {
 
 pub fn run(project: ProjectConfig) -> Result<()> {
     let mut app = DashApp::new(project);
+    app.attach_external_metro();
     let mut terminal = ratatui::init();
     let res = app.main_loop(&mut terminal);
     ratatui::restore();
@@ -123,91 +129,132 @@ impl DashApp {
         // Background device poller — simctl/adb are slow, so keep them off the UI thread.
         let dev_tx = tx.clone();
         let android_bundle = project.android_bundle_id().map(String::from);
-        std::thread::spawn(move || loop {
-            let running_devices = get_all_running(None);
-            // Resolve a running emulator's adb serial from its AVD name.
-            let android_serial = |avd: &str| {
-                running_devices.iter().find_map(|d| match d {
-                    RunningDevice::AndroidEmulator { name, serial } if name == avd => Some(serial.clone()),
+        std::thread::spawn(move || {
+            // devicectl is slow; refresh the iPhone details less often than the list.
+            let mut ios_details: HashMap<String, devinfo::IosDetail> = HashMap::new();
+            let mut ios_checked: Option<Instant> = None;
+            let mut ios_udids: Vec<String> = Vec::new();
+            loop {
+                let running_devices = get_all_running(None);
+                let udids: Vec<String> = running_devices.iter().filter_map(|d| match d {
+                    RunningDevice::IosPhysical { udid, .. } => Some(udid.clone()),
                     _ => None,
-                })
-            };
-            // Is the configured app installed / in the foreground? Android only —
-            // the iOS simctl probe was unreliable, so we don't check it.
-            let android_state = |serial: &str| match android_bundle.as_deref() {
-                Some(pkg) => (
-                    Some(android::app_installed(serial, pkg)),
-                    Some(android::foreground_package(serial).as_deref() == Some(pkg)),
-                ),
-                None => (None, None),
-            };
-            // Installed sims/emulators (bootable; openable once running) …
-            let mut rows: Vec<DeviceRow> = Vec::new();
-            for d in get_all_installed(None) {
-                let label = d.label();
-                let running = d.running();
-                let row = match &d {
-                    InstalledDevice::IosSim { udid, .. } => DeviceRow {
-                        label,
-                        platform: Platform::Ios,
-                        running,
-                        boot: Some(BootTarget::IosSim(udid.clone())),
-                        open: running.then(|| OpenTarget::IosSim(udid.clone())),
-                        installed: None, // iOS install state not probed
-                        foreground: None,
-                    },
-                    InstalledDevice::AndroidAvd { name, .. } => {
-                        let serial = if running { android_serial(name) } else { None };
-                        let (installed, foreground) = match &serial {
-                            Some(s) => android_state(s),
-                            None => (None, None),
-                        };
-                        DeviceRow {
-                            label,
-                            platform: Platform::Android,
-                            running,
-                            boot: Some(BootTarget::Avd(name.clone())),
-                            open: serial.map(OpenTarget::AndroidSerial),
-                            installed,
-                            foreground,
-                        }
-                    }
-                };
-                rows.push(row);
-            }
-            // … plus any connected physical devices (already running, not bootable).
-            for d in &running_devices {
-                match d {
-                    RunningDevice::IosPhysical { udid, .. } => {
-                        rows.push(DeviceRow {
-                            label: d.label(),
-                            platform: Platform::Ios,
-                            running: true,
-                            boot: None,
-                            open: Some(OpenTarget::IosPhysical(udid.clone())),
-                            installed: None, // devicectl app queries are slow — skip
-                            foreground: None,
-                        });
-                    }
-                    RunningDevice::AndroidPhysical { serial, .. } => {
-                        let (installed, foreground) = android_state(serial);
-                        rows.push(DeviceRow {
-                            label: d.label(),
-                            platform: Platform::Android,
-                            running: true,
-                            boot: None,
-                            open: Some(OpenTarget::AndroidSerial(serial.clone())),
-                            installed,
-                            foreground,
-                        });
-                    }
-                    _ => {}
+                }).collect();
+                if udids.is_empty() {
+                    ios_details.clear();
+                } else if udids != ios_udids || ios_checked.map_or(true, |t| t.elapsed() > Duration::from_secs(15)) {
+                    ios_details = devinfo::ios_physical();
+                    ios_checked = Some(Instant::now());
                 }
+                ios_udids = udids;
+                // Resolve a running emulator's adb serial from its AVD name.
+                let android_serial = |avd: &str| {
+                    running_devices.iter().find_map(|d| match d {
+                        RunningDevice::AndroidEmulator { name, serial } if name == avd => Some(serial.clone()),
+                        _ => None,
+                    })
+                };
+                // Is the configured app installed / in the foreground? Android only —
+                // the iOS simctl probe was unreliable, so we don't check it.
+                let android_state = |serial: &str| match android_bundle.as_deref() {
+                    Some(pkg) => (
+                        Some(android::app_installed(serial, pkg)),
+                        Some(android::foreground_package(serial).as_deref() == Some(pkg)),
+                    ),
+                    None => (None, None),
+                };
+                // Installed sims/emulators (bootable; openable once running) …
+                let mut rows: Vec<DeviceRow> = Vec::new();
+                for d in get_all_installed(None) {
+                    let label = d.label();
+                    let running = d.running();
+                    let row = match &d {
+                        InstalledDevice::IosSim { udid, .. } => DeviceRow {
+                            label,
+                            platform: Platform::Ios,
+                            running,
+                            boot: Some(BootTarget::IosSim(udid.clone())),
+                            open: running.then(|| OpenTarget::IosSim(udid.clone())),
+                            installed: None, // iOS install state not probed
+                            foreground: None,
+                            detail: None, // the runtime is already in the label
+                            problem: None,
+                        },
+                        InstalledDevice::AndroidAvd { name, .. } => {
+                            let serial = if running { android_serial(name) } else { None };
+                            let (installed, foreground) = match &serial {
+                                Some(s) => android_state(s),
+                                None => (None, None),
+                            };
+                            let detail = serial.as_deref().and_then(|s| devinfo::android_running(s, false)).or_else(|| devinfo::avd(name));
+                            DeviceRow {
+                                label,
+                                platform: Platform::Android,
+                                running,
+                                boot: Some(BootTarget::Avd(name.clone())),
+                                open: serial.map(OpenTarget::AndroidSerial),
+                                installed,
+                                foreground,
+                                detail,
+                                problem: None,
+                            }
+                        }
+                    };
+                    rows.push(row);
+                }
+                // … plus any connected physical devices (already running, not bootable).
+                for d in &running_devices {
+                    match d {
+                        RunningDevice::IosPhysical { udid, .. } => {
+                            let extra = ios_details.get(udid);
+                            rows.push(DeviceRow {
+                                label: d.label(),
+                                platform: Platform::Ios,
+                                running: true,
+                                boot: None,
+                                open: Some(OpenTarget::IosPhysical(udid.clone())),
+                                installed: None, // devicectl app queries are slow — skip
+                                foreground: None,
+                                detail: extra.map(|e| e.text.clone()).filter(|t| !t.is_empty()),
+                                problem: extra.and_then(|e| e.problem.clone()),
+                            });
+                        }
+                        RunningDevice::AndroidPhysical { serial, .. } => {
+                            let (installed, foreground) = android_state(serial);
+                            rows.push(DeviceRow {
+                                label: d.label(),
+                                platform: Platform::Android,
+                                running: true,
+                                boot: None,
+                                open: Some(OpenTarget::AndroidSerial(serial.clone())),
+                                installed,
+                                foreground,
+                                detail: devinfo::android_running(serial, true),
+                                problem: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                // Phones adb can see but not use yet, so they don't silently vanish.
+                for (serial, problem) in devinfo::android_unready() {
+                    rows.push(DeviceRow {
+                        label: format!("{serial}  (physical)"),
+                        platform: Platform::Android,
+                        running: false,
+                        boot: None,
+                        open: None,
+                        installed: None,
+                        foreground: None,
+                        detail: None,
+                        problem: Some(problem),
+                    });
+                }
+                if dev_tx.send(DashMsg::Devices(rows)).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2500));
             }
-            if dev_tx.send(DashMsg::Devices(rows)).is_err() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2500));
         });
         let mut rnview = RnView::new(None);
         rnview.set_root(Some(project.root.clone()));
@@ -217,6 +264,7 @@ impl DashApp {
             proc_sel: 0,
             proc_scroll: 0,
             metro_idx: None,
+            metro_external: false,
             client,
             rnview,
             focus: Pane::Processes,
@@ -266,8 +314,37 @@ impl DashApp {
         }
     }
 
-    fn start_metro(&mut self) {
+    /// If a Metro started elsewhere already holds the port, open a tab that
+    /// follows its bundler events (`m` in that tab takes it over).
+    fn attach_external_metro(&mut self) {
+        let port = self.project.metro_port();
+        if self.metro_idx.is_some() || !metro_events::port_in_use(port) {
+            return;
+        }
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "metroctl".into());
+        let cmd = format!("'{}' metro-events --port {port}", exe.replace('\'', "'\\''"));
+        if let Some(i) = self.spawn_proc("Metro (external)", &cmd) {
+            self.metro_idx = Some(i);
+            self.metro_external = true;
+            self.proc_sel = i;
+            self.set_flash(format!("Metro already running on :{port} — m to take over"));
+        }
+    }
+
+    /// Metro's start command, prefixed with `npx kill-port` when something
+    /// (e.g. a Metro from another terminal) already holds the port.
+    fn metro_cmd(&self) -> String {
+        let port = self.project.metro_port();
         let cmd = self.project.metro_command();
+        if metro_events::port_in_use(port) {
+            format!("npx --yes kill-port {port} && {cmd}")
+        } else {
+            cmd
+        }
+    }
+
+    fn start_metro(&mut self) {
+        let cmd = self.metro_cmd();
         // Restart in place if Metro is already a tab.
         if let Some(i) = self.metro_idx {
             if let Some(old) = self.procs.get_mut(i) {
@@ -278,7 +355,9 @@ impl DashApp {
                 Ok(p) => {
                     self.procs[i] = p;
                     self.proc_sel = i;
-                    self.set_flash("restarted Metro");
+                    self.proc_scroll = 0;
+                    let took_over = std::mem::take(&mut self.metro_external);
+                    self.set_flash(if took_over { "took over external Metro" } else { "restarted Metro" });
                 }
                 Err(e) => self.set_flash(format!("failed to restart Metro: {e}")),
             }
@@ -313,12 +392,13 @@ impl DashApp {
     /// Combined reset: deep clean (which reinstalls) → start Metro, chained in
     /// one pane. Stops the tracked Metro first so the new one can bind the port.
     fn reset_project(&mut self) {
+        self.metro_external = false;
         if let Some(i) = self.metro_idx.take() {
             if let Some(old) = self.procs.get_mut(i) {
                 old.kill();
             }
         }
-        let cmd = format!("{} && {}", self.project.clean_command(), self.project.metro_command());
+        let cmd = format!("{} && {}", self.project.clean_command(), self.metro_cmd());
         if let Some(i) = self.spawn_proc("Reset", &cmd) {
             self.proc_sel = i;
             self.set_flash("reset: deep clean (reinstalls) → Metro");
@@ -379,9 +459,9 @@ impl DashApp {
                 self.boot_target(target, dev.label.clone());
                 // Don't build yet: a sim/emulator that isn't up makes run-ios /
                 // run-android fall back to "first available" — the wrong device.
-                // Boot now; build on the next ⏎ once it shows ● running.
+                // Boot now; build on the next b once it shows ● running.
                 let what = if android { "emulator" } else { "simulator" };
-                self.set_flash(format!("{what} starting — press ⏎ again once it shows ● running"));
+                self.set_flash(format!("{what} starting — press b again once it shows ● running"));
                 return;
             }
         }
@@ -543,7 +623,7 @@ impl DashApp {
     /// Send a single Metro interactive key (`r`/`d`/`j`…) to the Metro PTY, with a
     /// CDP reload fallback when Metro isn't running under us.
     fn metro_key(&mut self, byte: u8, what: &str) {
-        if let Some(i) = self.metro_idx {
+        if let Some(i) = self.metro_idx.filter(|_| !self.metro_external) {
             if let Some(p) = self.procs.get_mut(i) {
                 if p.is_alive() {
                     p.write_input(&[byte]);
@@ -551,6 +631,12 @@ impl DashApp {
                     return;
                 }
             }
+        }
+        // A Metro we don't own: send the command through its events socket.
+        let command = if byte == b'r' { "reload" } else { "devMenu" };
+        if matches!(byte, b'r' | b'd') && metro_events::send_command(self.project.metro_port(), command) {
+            self.set_flash(format!("metro: {what}"));
+            return;
         }
         if byte == b'r' {
             if let Some(k) = self.rnview.active_target() {
@@ -719,6 +805,9 @@ impl DashApp {
                     self.proc_scroll = 0;
                 }
             }
+            KeyCode::Enter if self.metro_external && self.metro_idx == Some(self.proc_sel) => {
+                self.set_flash("external Metro takes no input here — m to take over");
+            }
             KeyCode::Enter => {
                 if self.procs.get(self.proc_sel).map(|p| p.is_alive()).unwrap_or(false) {
                     self.input_mode = true;
@@ -750,8 +839,8 @@ impl DashApp {
                     self.dev_sel = (self.dev_sel + 1).min(self.devices.len() - 1);
                 }
             }
-            KeyCode::Enter => self.install_selected(),
-            KeyCode::Char('b') => self.start_selected_device(),
+            KeyCode::Enter => self.start_selected_device(),
+            KeyCode::Char('b') => self.install_selected(),
             KeyCode::Char('s') => self.stop_selected_device(),
             KeyCode::Char('o') => self.open_selected(),
             KeyCode::Char('l') => {
@@ -1003,7 +1092,7 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     let metro_line = if metro_up {
         Line::from(vec![
             Span::styled("Metro  ● ", Style::default().fg(Color::Green)),
-            Span::raw(format!("running :{}", app.project.metro_port())),
+            Span::raw(format!("running :{}{}", app.project.metro_port(), if app.metro_external { " (external)" } else { "" })),
         ])
     } else {
         Line::from(vec![Span::styled("Metro  ○ ", Style::default().fg(Color::DarkGray)), Span::raw("stopped  (m)")])
@@ -1034,11 +1123,25 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
         if d.foreground == Some(true) {
             spans.push(Span::styled("  ▶fg", Style::default().fg(Color::Cyan)));
         }
+        if let Some(t) = &d.detail {
+            spans.push(Span::styled(format!("  {t}"), Style::default().fg(Color::DarkGray)));
+        }
+        if let Some(p) = &d.problem {
+            spans.push(Span::styled(format!("  ⚠ {p}"), Style::default().fg(Color::Yellow)));
+        }
         lines.push(Line::from(spans));
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), content);
     if let Some(h) = hint {
-        render_hint(frame, h, " ↑↓ sel · ⏎ build · b start · s stop · o open · l links", focused);
+        // Start/stop boot or shut down a simulator/emulator, so only offer the
+        // one that applies to the highlighted row (neither for a real device).
+        let sim = app.devices.get(app.dev_sel).filter(|d| d.boot.is_some());
+        let power = match sim {
+            Some(d) if d.running => " · s stop",
+            Some(_) => " · ⏎ start",
+            None => "",
+        };
+        render_hint(frame, h, &format!(" ↑↓ sel{power} · b build · o open · l links"), focused);
     }
 }
 
