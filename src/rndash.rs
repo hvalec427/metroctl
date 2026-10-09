@@ -208,13 +208,15 @@ impl DashApp {
             }
             std::thread::sleep(Duration::from_millis(2500));
         });
+        let mut rnview = RnView::new(None);
+        rnview.set_root(Some(project.root.clone()));
         DashApp {
             project,
             procs: Vec::new(),
             proc_sel: 0,
             metro_idx: None,
             client,
-            rnview: RnView::new(None),
+            rnview,
             focus: Pane::Processes,
             input_mode: false,
             devices: Vec::new(),

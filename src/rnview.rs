@@ -282,6 +282,7 @@ pub struct RnView {
     // the list is active, or a wrapped-preview-line index when maximized.
     visual: Option<usize>,
     detail_cursor: usize, // current line in the maximized preview
+    root: Option<String>, // project root, to resolve relative stack-frame paths
 }
 
 impl RnView {
@@ -312,7 +313,14 @@ impl RnView {
             focused: true,
             visual: None,
             detail_cursor: 0,
+            root: None,
         }
+    }
+
+    /// Project root used to resolve relative stack-frame paths when opening a
+    /// frame in nvim (`o`).
+    pub fn set_root(&mut self, root: Option<String>) {
+        self.root = root;
     }
 
     fn eff_sel(&self, len: usize) -> usize {
@@ -824,7 +832,8 @@ fn footer(view: &RnView, is_logs: bool) -> String {
                 let z = if view.maximized { "z split" } else { "z max" };
                 let copy = if is_logs { "" } else { " · c curl" };
                 let vis = if view.maximized { " · V select" } else { "" };
-                return format!(" ⏎ close · {z} · jk {} · JK scroll · / search{nn}{vis} · y copy{copy} · q quit", if view.maximized { "move" } else { "list" });
+                let open = if view.maximized { " · o nvim" } else { "" };
+                return format!(" ⏎ close · {z} · jk {} · JK scroll · / search{nn}{vis} · y copy{copy}{open} · q quit", if view.maximized { "move" } else { "list" });
             }
             let nn = if view.search.is_empty() { "" } else { " · n/N" };
             let scroll = if view.follow { "on" } else { "off" };
@@ -991,6 +1000,155 @@ fn send_if_paused(view: &RnView, client: &RnClient, key: &Option<String>, cmd: C
     }
 }
 
+// ── open a stack frame in the running nvim ───────────────────────────────────
+
+/// Pull a `file:line` (or `file:line:col`) out of a rendered stack line — e.g.
+/// the `(src/foo.ts:42)` in a frame.
+fn parse_location(line: &str) -> Option<(String, usize)> {
+    let candidate = match (line.rfind('('), line.rfind(')')) {
+        (Some(a), Some(b)) if b > a + 1 => &line[a + 1..b],
+        _ => line.trim(),
+    };
+    let mut it = candidate.rsplitn(3, ':');
+    let last = it.next()?;
+    let mid = it.next()?;
+    let (file, line_str) = if mid.parse::<usize>().is_ok() {
+        (it.next()?, mid) // file:line:col
+    } else if last.parse::<usize>().is_ok() {
+        (mid, last) // file:line
+    } else {
+        return None;
+    };
+    let line_no: usize = line_str.parse().ok()?;
+    let file = file.trim();
+    if file.is_empty() {
+        return None;
+    }
+    Some((file.to_string(), line_no))
+}
+
+/// Resolve a (possibly project-relative) source path against the project root.
+fn resolve_path(file: &str, root: Option<&str>) -> String {
+    if file.starts_with('/') {
+        return file.to_string();
+    }
+    match root {
+        Some(r) => format!("{}/{file}", r.trim_end_matches('/')),
+        None => file.to_string(),
+    }
+}
+
+fn open_at_cursor(view: &mut RnView) {
+    let lines = view.detail_wrapped();
+    let line = match lines.get(view.detail_cursor) {
+        Some(l) => l.clone(),
+        None => return,
+    };
+    let (file, line_no) = match parse_location(&line) {
+        Some(x) => x,
+        None => {
+            view.flash = Some("no file:line on this line".into());
+            return;
+        }
+    };
+    let path = resolve_path(&file, view.root.as_deref());
+    match open_in_nvim(&path, line_no) {
+        Ok(()) => view.flash = Some(format!("opening {file}:{line_no}")),
+        Err(e) => view.flash = Some(e),
+    }
+}
+
+/// Open `path` at `line` in an already-running nvim: a tmux pane running nvim if
+/// we're in tmux, otherwise the running nvim's `--server` socket.
+fn open_in_nvim(path: &str, line: usize) -> Result<(), String> {
+    if std::env::var("TMUX").is_ok() {
+        let pane = tmux_nvim_pane().ok_or("no nvim pane in this tmux session")?;
+        let goto = format!(":e +{line} {path}");
+        let run = |args: &[&str]| {
+            let _ = Command::new("tmux").args(args).status();
+        };
+        run(&["send-keys", "-t", &pane, "Escape"]);
+        run(&["send-keys", "-t", &pane, &goto, "Enter"]);
+        run(&["select-window", "-t", &pane]);
+        run(&["select-pane", "-t", &pane]);
+        return Ok(());
+    }
+    let sock = nvim_socket().ok_or("no running nvim found (start it with --listen, or set NVIM_LISTEN_ADDRESS)")?;
+    let keys = format!("<C-\\><C-n>:e +{line} {path}<CR>");
+    let ok = Command::new("nvim")
+        .args(["--server", &sock, "--remote-send", &keys])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err("couldn't reach the nvim server".into())
+    }
+}
+
+/// The pane id of an nvim in the current tmux session, if any.
+fn tmux_nvim_pane() -> Option<String> {
+    let out = Command::new("tmux").args(["list-panes", "-s", "-F", "#{pane_id} #{pane_current_command}"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for l in text.lines() {
+        let mut parts = l.split_whitespace();
+        let id = parts.next()?;
+        if parts.next() == Some("nvim") {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
+/// Best-effort discovery of a running nvim server socket (off-tmux fallback).
+fn nvim_socket() -> Option<String> {
+    for var in ["NVIM_LISTEN_ADDRESS", "NVIM"] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    for var in ["XDG_RUNTIME_DIR", "TMPDIR"] {
+        if let Ok(v) = std::env::var(var) {
+            roots.push(std::path::PathBuf::from(v));
+        }
+    }
+    roots.push(std::path::PathBuf::from("/tmp"));
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    let mut consider = |p: std::path::PathBuf| {
+        if let Ok(meta) = std::fs::metadata(&p) {
+            let t = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            if best.as_ref().map(|(bt, _)| t > *bt).unwrap_or(true) {
+                best = Some((t, p.to_string_lossy().into_owned()));
+            }
+        }
+    };
+    for r in roots {
+        if let Ok(entries) = std::fs::read_dir(&r) {
+            for e in entries.flatten() {
+                let p = e.path();
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !name.starts_with("nvim") {
+                    continue;
+                }
+                if p.is_dir() {
+                    if let Ok(inner) = std::fs::read_dir(&p) {
+                        for ie in inner.flatten() {
+                            consider(ie.path());
+                        }
+                    }
+                } else {
+                    consider(p);
+                }
+            }
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
 /// Returns true to quit.
 fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
     if view.mode != Mode::Normal {
@@ -1104,6 +1262,8 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             }
         }
         KeyCode::Char('p') => view.clear_on_restart = !view.clear_on_restart,
+        // Open the stack frame under the cursor in the already-running nvim.
+        KeyCode::Char('o') if view.detail && view.maximized => open_at_cursor(view),
         KeyCode::Char('V') => {
             if view.visual.is_some() {
                 view.visual = None;

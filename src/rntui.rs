@@ -11,6 +11,8 @@ use std::time::Duration;
 pub fn run(port: u16, name: Option<&str>) -> Result<()> {
     let client = RnClient::start(port);
     let mut view = RnView::new(name);
+    // Standalone `logs` is run from the project dir — resolve frame paths against it.
+    view.set_root(std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from)));
     let mut terminal = ratatui::init();
     let res = main_loop(&mut view, &mut terminal, &client);
     ratatui::restore();
