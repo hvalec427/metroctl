@@ -1,0 +1,2 @@
+#!/bin/sh
+exec bash scripts/commit-lint.sh --file "$1"
