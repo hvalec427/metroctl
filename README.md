@@ -13,6 +13,8 @@ metroctl config   # print the config file path
 metroctl logs     # just the React Native log viewer (see docs/logs.md)
 metroctl up …     # dashboard set up for this checkout (port, simulator, build)
 metroctl down     # stop the `up` session in this checkout
+metroctl gc       # clean up after sessions that died (--sims: orphaned simulators)
+metroctl mcp      # MCP server for coding agents (see below)
 ```
 
 ## Install
@@ -212,6 +214,34 @@ metroctl down                         # from another shell: stop it, delete its 
   config with its root moved into the worktree. No `init` is needed.
 - The running session is described in `.metroctl/session.json` (pid, port,
   udid, status), which is git-excluded.
+
+- Sessions that die without cleaning up (killed, crashed) are reaped the
+  next time `up` runs, or with `metroctl gc`: their simulator is deleted if
+  metroctl created it, otherwise the app is stopped and its port setting reset.
+  `gc --sims` also deletes `metroctl-*` simulators no running session owns.
+
+## Agents (`metroctl mcp`)
+
+Every dashboard serves a control socket (path in `.metroctl/session.json`).
+`metroctl ctl <cmd> [json]` sends it one command; `metroctl mcp` is an MCP
+server on top of it for coding agents:
+
+```json
+{ "mcpServers": { "metroctl": { "command": "metroctl", "args": ["mcp"] } } }
+```
+
+| Tool | |
+|---|---|
+| `status`, `wait_ready` | session state; block until the app runs (or the build fails) |
+| `logs`, `errors`, `network`, `request` | JS console, failures, requests (`since` for only new entries) |
+| `output` | last lines of a process tab (build errors) |
+| `reload`, `rebuild`, `restart_metro` | drive the session |
+| `screenshot`, `open_url` | see the screen, open deep links |
+| `ui`, `tap`, `swipe`, `type_text`, `press` | use the app: element tree with testIDs, tap by testID or label |
+
+UI control uses WebDriverAgent on iOS simulators (cloned and built into
+`~/.cache/metroctl` on first use, then run in a tab; `METROCTL_WDA_TAG`
+picks the release) and adb on Android. Physical iPhones aren't supported yet.
 
 ## Contributing
 

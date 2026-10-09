@@ -39,6 +39,7 @@ pub struct Pinned {
     pub udid: String,
     pub created: bool,         // we created it, so we may delete it
     pub simulator: bool,       // false for a physical device (nothing to boot)
+    pub android: bool,         // an adb serial (emulator or phone) rather than an iOS udid
     pub cleanup: SimCleanup,
     pub name: Option<String>, // device name, to tell its app apart from others on the same Metro
 }
@@ -54,6 +55,12 @@ pub struct SessionFile {
     #[serde(default)]
     pub created_sim: bool,
     pub status: String,
+    /// ios_simulator | ios_device | android (picks the UI-control backend).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// WebDriverAgent port, once started for UI control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wda_port: Option<u16>,
     /// iOS bundle id of the app (to release it on `down`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
@@ -163,6 +170,9 @@ pub fn reap_stale() -> Vec<String> {
                 if delete_simulator(udid).is_ok() {
                     done.push(format!("deleted simulator {udid} of a dead session in {}", s.root));
                 }
+            } else if s.platform.as_deref() == Some("android") {
+                android_release(udid);
+                done.push(format!("removed the adb port mapping on {udid} (dead session in {})", s.root));
             } else if let Some(bundle) = &s.bundle {
                 release_app(udid, bundle);
                 done.push(format!("released the app on {udid} (dead session in {})", s.root));
@@ -204,9 +214,16 @@ pub fn gc(sims: bool) -> Result<()> {
     Ok(())
 }
 
+/// A port for WebDriverAgent: from 8100, skipping other sessions' and
+/// anything listening.
+pub fn free_wda_port() -> Result<u16> {
+    let claimed: Vec<u16> = live_sessions().iter().flat_map(|s| [Some(s.port), s.wda_port]).flatten().collect();
+    (8100..8200).find(|p| !claimed.contains(p) && !crate::metro_events::port_in_use(*p)).ok_or_else(|| anyhow!("no free port in 8100–8199"))
+}
+
 /// First port from `start` that's neither listening nor claimed by a session.
 pub fn free_port(start: u16) -> Result<u16> {
-    let claimed: Vec<u16> = live_sessions().iter().map(|s| s.port).collect();
+    let claimed: Vec<u16> = live_sessions().iter().flat_map(|s| [Some(s.port), s.wda_port]).flatten().collect();
     (start..start.saturating_add(100))
         .find(|p| !claimed.contains(p) && !crate::metro_events::port_in_use(*p))
         .ok_or_else(|| anyhow!("no free port in {start}–{}", start.saturating_add(99)))
@@ -331,6 +348,31 @@ pub fn point_app_at_port(udid: &str, bundle: &str, port: u16) -> Result<bool> {
     Ok(true)
 }
 
+/// adb serials of connected, ready Android devices and emulators.
+pub fn adb_serials() -> Vec<String> {
+    let out = Command::new("adb").arg("devices").output();
+    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    text.lines().skip(1).filter_map(|l| l.split_once('\t')).filter(|(_, s)| s.trim() == "device").map(|(d, _)| d.to_string()).collect()
+}
+
+/// Android's counterpart of `point_app_at_port`: the app loads from
+/// localhost:8081 on the device, so map that to our port and relaunch it.
+pub fn android_point_app_at_port(serial: &str, package: Option<&str>, port: u16) -> Result<()> {
+    let out = Command::new("adb").args(["-s", serial, "reverse", "tcp:8081", &format!("tcp:{port}")]).output()?;
+    if !out.status.success() {
+        bail!("adb reverse: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    if let Some(pkg) = package {
+        let _ = Command::new("adb").args(["-s", serial, "shell", "am", "force-stop", pkg]).output();
+        let _ = Command::new("adb").args(["-s", serial, "shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"]).output();
+    }
+    Ok(())
+}
+
+pub fn android_release(serial: &str) {
+    let _ = Command::new("adb").args(["-s", serial, "reverse", "--remove", "tcp:8081"]).output();
+}
+
 /// Shell command that boots a simulator, shows it, and waits until it's ready.
 pub fn boot_command(udid: &str) -> String {
     format!(
@@ -366,6 +408,8 @@ pub fn down(root: &Path, keep_sim: bool) -> Result<()> {
     if let (Some(udid), true, false) = (&s.udid, s.created_sim, keep_sim) {
         delete_simulator(udid)?;
         println!("deleted simulator {udid}");
+    } else if let (Some(udid), Some("android")) = (&s.udid, s.platform.as_deref()) {
+        android_release(udid);
     } else if let (Some(udid), Some(bundle)) = (&s.udid, &s.bundle) {
         release_app(udid, bundle);
     }

@@ -16,6 +16,7 @@ mod rndash;
 mod rntui;
 mod rnview;
 mod session;
+mod ui;
 mod update;
 
 use clap::{Parser, Subcommand};
