@@ -2,12 +2,11 @@
 # Install metroctl into ~/.metroctl/bin (no sudo) and put that on your PATH.
 #   curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/master/install.sh | sh
 #   … | sh -s -- dev        rolling dev build (or `nightly`, or a version tag)
-#   INSTALL_DIR=~/bin …      install somewhere else
 set -e
 
 TOOL="metroctl"
 REPO="hvalec427/metroctl"
-BIN_DIR="${INSTALL_DIR:-$HOME/.$TOOL/bin}"
+BIN_DIR="$HOME/.$TOOL/bin"
 
 # Detect architecture
 ARCH=$(uname -m)

@@ -1,9 +1,9 @@
 #!/bin/sh
-# Remove metroctl from ~/.metroctl/bin (or $INSTALL_DIR) and its PATH line.
+# Remove metroctl from ~/.metroctl/bin and its PATH line.
 set -e
 
 TOOL="metroctl"
-BIN_DIR="${INSTALL_DIR:-$HOME/.$TOOL/bin}"
+BIN_DIR="$HOME/.$TOOL/bin"
 
 if [ -f "$BIN_DIR/$TOOL" ]; then
   rm -f "$BIN_DIR/$TOOL"

@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/master/install.s
 ```
 
 It installs to `~/.metroctl/bin/metroctl` (no sudo) and adds that folder to your PATH in
-your shell config (`INSTALL_DIR=…` installs elsewhere).
+your shell config.
 
 Grab the binary from the [latest release](https://github.com/hvalec427/metroctl/releases/latest), or the bleeding edge with `… | sh -s -- dev`. Re-run the installer to update. Uninstall:
 
