@@ -132,6 +132,7 @@ pub struct DashApp {
     link_values: HashMap<String, String>, // last value per placeholder name, prefilled next time
     help: Option<u16>, // `?` key-reference popup, with its scroll offset
     quit: bool,
+    started: Instant, // the "debugger off" notice only shows for a while after start
     pinned: Option<Pinned>,     // device this session builds onto (`metroctl up`)
     setup: Option<SetupRun>,    // `metroctl up` steps still in progress
     status: String,             // session status, mirrored to .metroctl/session.json
@@ -384,6 +385,7 @@ impl DashApp {
             link_values: HashMap::new(),
             help: None,
             quit: false,
+            started: Instant::now(),
             pinned,
             setup: None,
             status: "ready".into(),
@@ -1904,7 +1906,7 @@ fn render_status(app: &DashApp, frame: &mut Frame, area: Rect) {
         format!(" {f}")
     } else if app.input_mode {
         " INPUT — keys go to the process · Esc to exit".into()
-    } else if let Some(e) = &app.client.dap_error {
+    } else if let Some(e) = app.client.dap_error.as_ref().filter(|_| app.started.elapsed() < Duration::from_secs(10)) {
         format!(" ⚠ {e}")
     } else {
         " ⇥ focus · ^←→↑↓ resize · R reload · D dev-menu · ? keys · q quit".into()
