@@ -60,11 +60,7 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
         eprintln!("created {desc} ({udid})");
         Some(Pinned { udid, created: true, simulator: true, android: false, cleanup, name: Some(name) })
     } else {
-        opts.device.as_ref().map(|udid| {
-            let info = session::sim_info(udid);
-            let android = info.is_none() && session::adb_serials().contains(udid);
-            Pinned { udid: udid.clone(), created: false, simulator: info.is_some(), android, cleanup, name: info.map(|i| i.1) }
-        })
+        opts.device.as_deref().map(|id| session::pin_device(id, cleanup)).transpose()?
     };
     let up = opts.port.is_some() || pinned.is_some() || opts.install;
     // --prebuilt: the main checkout's last simulator build, when there is one.

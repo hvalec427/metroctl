@@ -440,7 +440,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1312,7 +1312,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1714,7 +1714,7 @@ dependencies = [
 [[package]]
 name = "simon"
 version = "0.0.0"
-source = "git+https://github.com/hvalec427/simon?branch=develop#31d49bda0b48859ffb6d7e868b0dcca922675205"
+source = "git+https://github.com/hvalec427/simon?branch=develop#33393bf59031a4ef9eeab9791d76e47652fe7a71"
 dependencies = [
  "anyhow",
  "clap",

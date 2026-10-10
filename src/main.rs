@@ -40,7 +40,7 @@ enum Command {
         /// Metro port, or `auto` for the first free one from the configured port
         #[arg(long)]
         port: Option<String>,
-        /// Pin to an existing device (udid); booted if it's a simulator
+        /// Pin to an existing device: iOS udid, AVD name, adb serial, or a name only one device has; started if needed
         #[arg(long, conflicts_with = "new_sim")]
         device: Option<String>,
         /// Create a new simulator for this session (default name: metroctl-<dir>)

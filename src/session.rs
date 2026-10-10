@@ -23,7 +23,7 @@ pub enum SimCleanup {
 pub struct UpOpts {
     /// `None` = configured port, `Some(None)` = first free port, `Some(Some(n))` = n.
     pub port: Option<Option<u16>>,
-    /// Pin to an existing device by udid.
+    /// Pin to an existing device (see `session::pin_device`).
     pub device: Option<String>,
     /// Create a new simulator (optionally with this name).
     pub new_sim: Option<Option<String>>,
@@ -450,6 +450,38 @@ pub fn adb_serials() -> Vec<String> {
     let out = Command::new("adb").arg("devices").output();
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
     text.lines().skip(1).filter_map(|l| l.split_once('\t')).filter(|(_, s)| s.trim() == "device").map(|(d, _)| d.to_string()).collect()
+}
+
+/// The device `up --device` names, resolved like simon and touchctl do (iOS
+/// udid, AVD name, adb serial, or a name only one device has). A stopped
+/// emulator is started; a stopped simulator gets booted with the session.
+pub fn pin_device(id: &str, cleanup: SimCleanup) -> Result<Pinned> {
+    use simon::devices::{find_device, Found, InstalledDevice, RunningDevice};
+    let pin = |udid: String, simulator: bool, android: bool, name: Option<String>| Pinned { udid, created: false, simulator, android, cleanup, name };
+    Ok(match find_device(id)? {
+        Found::Running(RunningDevice::IosSim { udid, name, .. }) | Found::Stopped(InstalledDevice::IosSim { udid, name, .. }) => pin(udid, true, false, Some(name)),
+        Found::Running(RunningDevice::IosPhysical { udid, .. }) => pin(udid, false, false, None),
+        Found::Running(RunningDevice::AndroidEmulator { serial, .. } | RunningDevice::AndroidPhysical { serial, .. }) => pin(serial, false, true, None),
+        Found::Stopped(InstalledDevice::AndroidAvd { name, .. }) => pin(boot_avd(&name)?, false, true, None),
+    })
+}
+
+/// Start an emulator and wait until it has booted; returns its adb serial.
+fn boot_avd(avd: &str) -> Result<String> {
+    eprintln!("starting emulator {avd}…");
+    simon::android::launch_avd(avd)?;
+    let deadline = Instant::now() + Duration::from_secs(240);
+    while Instant::now() < deadline {
+        let serial = simon::android::running_emulators().into_iter().find(|e| e.name == avd).map(|e| e.serial);
+        if let Some(serial) = serial {
+            let booted = Command::new("adb").args(["-s", &serial, "shell", "getprop", "sys.boot_completed"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1");
+            if booted {
+                return Ok(serial);
+            }
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    bail!("emulator {avd} didn't finish booting in 4 minutes")
 }
 
 /// Android's counterpart of `point_app_at_port`: the app loads from

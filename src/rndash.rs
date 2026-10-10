@@ -63,6 +63,7 @@ enum OpenTarget {
 #[derive(Clone)]
 struct DeviceRow {
     label: String,
+    id: String, // what `--device` takes: udid, AVD name or adb serial
     platform: Platform,
     running: bool,
     boot: Option<BootTarget>,
@@ -259,6 +260,7 @@ impl DashApp {
                     let row = match &d {
                         InstalledDevice::IosSim { udid, .. } => DeviceRow {
                             label,
+                            id: udid.clone(),
                             platform: Platform::Ios,
                             running,
                             boot: Some(BootTarget::IosSim(udid.clone())),
@@ -278,6 +280,7 @@ impl DashApp {
                             let detail = serial.as_deref().and_then(|s| devinfo::android_running(s, false)).or_else(|| devinfo::avd(name));
                             DeviceRow {
                                 label,
+                                id: name.clone(),
                                 platform: Platform::Android,
                                 running,
                                 boot: Some(BootTarget::Avd(name.clone())),
@@ -299,6 +302,7 @@ impl DashApp {
                             let extra = ios_details.get(udid);
                             rows.push(DeviceRow {
                                 label: format!("{name}  iOS {os_version}"),
+                                id: udid.clone(),
                                 platform: Platform::Ios,
                                 running: true,
                                 boot: None,
@@ -314,6 +318,7 @@ impl DashApp {
                             let (installed, foreground) = android_state(serial);
                             rows.push(DeviceRow {
                                 label: d.name().to_string(),
+                                id: serial.clone(),
                                 platform: Platform::Android,
                                 running: true,
                                 boot: None,
@@ -331,7 +336,8 @@ impl DashApp {
                 // Phones adb can see but not use yet, so they don't silently vanish.
                 for (serial, problem) in devinfo::android_unready() {
                     rows.push(DeviceRow {
-                        label: serial,
+                        label: serial.clone(),
+                        id: serial,
                         platform: Platform::Android,
                         running: false,
                         boot: None,
@@ -344,7 +350,7 @@ impl DashApp {
                     });
                 }
                 for r in &mut rows {
-                    r.pinned = pinned_udid.is_some() && r.ios_udid() == pinned_udid;
+                    r.pinned = pinned_udid.is_some() && (r.ios_udid() == pinned_udid || r.android_serial() == pinned_udid);
                 }
                 // Group as the pane shows them: this session's device, iOS sims,
                 // iPhones, Android emulators, phones.
@@ -1848,6 +1854,10 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
             Style::default()
         };
         let mut spans = vec![Span::raw(" "), marker, Span::styled(d.label.clone(), name_style)];
+        // The highlighted device's id, for `--device` in metroctl, touchctl and simon.
+        if focused && i == app.dev_sel && d.id != d.label {
+            spans.push(Span::styled(format!("  {}", d.id), Style::default().fg(Color::DarkGray)));
+        }
         // App-presence tags (only meaningful with a configured bundleId).
         match d.installed {
             Some(true) => spans.push(Span::styled("  app✓", Style::default().fg(Color::Green))),

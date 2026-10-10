@@ -199,7 +199,7 @@ simulator, so several checkouts (e.g. git worktrees) can run side by side:
 
 ```sh
 metroctl up --port auto --new-sim     # free port, new simulator, Metro, build
-metroctl up --port 8090 --device <udid>
+metroctl up --port 8090 --device <id>   # iOS udid, AVD name, adb serial, or a unique name
 metroctl down                         # from another shell: stop it, delete its simulator
 ```
 
