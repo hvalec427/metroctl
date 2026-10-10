@@ -63,6 +63,11 @@ enum Command {
         #[arg(long)]
         prebuilt: bool,
     },
+    /// Simulator helpers for tools that manage their own simulators (e.g. orc)
+    Sim {
+        #[command(subcommand)]
+        action: SimAction,
+    },
     /// Clean up after metroctl sessions that died (simulators, app port settings)
     Gc {
         /// Also delete `metroctl-*` simulators no running session owns
@@ -124,6 +129,24 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum SimAction {
+    /// Create a simulator, cloned from a settled template (fast, ready to launch apps),
+    /// and print its udid. It isn't tracked: whoever creates it deletes it
+    /// (`xcrun simctl delete <udid>`).
+    New {
+        /// Simulator name
+        #[arg(long)]
+        name: String,
+        /// Device type, e.g. "iPhone 16 Pro" (default: newest plain iPhone)
+        #[arg(long = "sim-type")]
+        sim_type: Option<String>,
+        /// iOS runtime, e.g. 18.2 (default: newest installed)
+        #[arg(long = "sim-runtime")]
+        sim_runtime: Option<String>,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -144,6 +167,17 @@ fn main() {
             commands_rn::launch(session::UpOpts { port, device, new_sim, sim_type, sim_runtime, sim_cleanup: Some(sim_cleanup), install, prebuilt })
         }
         Some(Command::Down { keep_sim }) => commands_rn::down(keep_sim),
+        Some(Command::Sim { action: SimAction::New { name, sim_type, sim_runtime } }) => match session::create_simulator(&name, sim_runtime.as_deref(), sim_type.as_deref()) {
+            // stdout: just the udid, for scripts; the description goes to stderr.
+            Ok((udid, desc)) => {
+                eprintln!("created {name}: {desc}");
+                println!("{udid}");
+            }
+            Err(e) => {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+        },
         Some(Command::Gc { sims }) => {
             if let Err(e) = session::gc(sims) {
                 eprintln!("{e:#}");

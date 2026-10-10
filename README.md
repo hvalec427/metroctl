@@ -14,6 +14,7 @@ metroctl logs     # just the React Native log viewer (see docs/logs.md)
 metroctl up …     # dashboard set up for this checkout (port, simulator, build)
 metroctl down     # stop the `up` session in this checkout
 metroctl gc       # clean up after sessions that died (--sims: orphaned simulators)
+metroctl sim new --name X   # clone a ready simulator from the template, print its udid (yours to delete)
 metroctl mcp      # MCP server for coding agents (see below)
 ```
 
