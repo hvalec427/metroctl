@@ -185,8 +185,14 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
         }
     }
     let socket = app.socket.clone();
+    // Stopped by a signal (window closed, killed, `metroctl down`) with a
+    // simulator we created: leave the session files, so `down`, `gc` or the
+    // next `up` can still find and delete that simulator.
+    let orphan = app.term.load(Ordering::Relaxed) && app.pinned.as_ref().is_some_and(|p| p.created);
     drop(app); // stops Metro and the other processes
-    session::remove_session(&root);
+    if !orphan {
+        session::remove_session(&root);
+    }
     if let Some(p) = socket {
         let _ = std::fs::remove_file(p);
     }
