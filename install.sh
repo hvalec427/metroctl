@@ -1,14 +1,20 @@
 #!/bin/sh
+# Install metroctl into ~/.metroctl/bin (no sudo) and put that on your PATH.
+#   curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/master/install.sh | sh
+#   … | sh -s -- dev        rolling dev build (or `nightly`, or a version tag)
+#   INSTALL_DIR=~/bin …      install somewhere else
 set -e
 
+TOOL="metroctl"
 REPO="hvalec427/metroctl"
+BIN_DIR="${INSTALL_DIR:-$HOME/.$TOOL/bin}"
 
 # Detect architecture
 ARCH=$(uname -m)
 if [ "$ARCH" = "arm64" ]; then
-  FILE="metroctl-darwin-arm64"
+  FILE="$TOOL-darwin-arm64"
 else
-  FILE="metroctl-darwin-x64"
+  FILE="$TOOL-darwin-x64"
 fi
 
 # `dev` → rolling dev build; `nightly` → newest nightly; a version string → that
@@ -31,7 +37,7 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-# The channel this build belongs to; `metroctl update` stays on it.
+# The channel this build belongs to; `$TOOL update` stays on it.
 case "$VERSION" in
   dev) CHANNEL="dev" ;;
   *-dev.*) CHANNEL="dev" ;;
@@ -39,37 +45,53 @@ case "$VERSION" in
   *) CHANNEL="stable" ;;
 esac
 
-# Install over the metroctl already on PATH if there is one, so we never leave a
-# stale copy shadowing the new version; otherwise default to /usr/local/bin.
-EXISTING=$(command -v metroctl 2>/dev/null || true)
-if [ -n "$EXISTING" ]; then
-  INSTALL_PATH="$EXISTING"
-else
-  INSTALL_PATH="/usr/local/bin/metroctl"
-fi
-INSTALL_DIR=$(dirname "$INSTALL_PATH")
-
 URL="https://github.com/$REPO/releases/download/$VERSION/$FILE"
+TMP="$(mktemp -t "$TOOL")"
 
-echo "Installing metroctl $VERSION ($ARCH) to $INSTALL_PATH..."
-curl -fsSL "$URL" -o /tmp/metroctl
-chmod +x /tmp/metroctl
+echo "Installing $TOOL $VERSION ($ARCH) to $BIN_DIR/${TOOL}…"
+curl -fsSL "$URL" -o "$TMP"
+chmod +x "$TMP"
 # Strip the macOS quarantine flag so Gatekeeper doesn't block the (un-notarized)
 # binary with "Apple could not verify ... free of malware". No-op off macOS.
-xattr -d com.apple.quarantine /tmp/metroctl 2>/dev/null || true
+xattr -d com.apple.quarantine "$TMP" 2>/dev/null || true
+mkdir -p "$BIN_DIR"
+# mv (a new file), never overwrite in place: macOS kills a binary whose
+# signature changed under it.
+mv -f "$TMP" "$BIN_DIR/$TOOL"
 
-# Only use sudo when the target directory isn't writable.
-if [ -w "$INSTALL_DIR" ]; then
-  mv /tmp/metroctl "$INSTALL_PATH"
-else
-  sudo mv /tmp/metroctl "$INSTALL_PATH"
+echo "Done — $TOOL $VERSION ($CHANNEL channel) installed to $BIN_DIR/$TOOL"
+
+# Put BIN_DIR on PATH in the user's shell config (once).
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ON_PATH=1 ;;
+  *) ON_PATH=0 ;;
+esac
+case "$BIN_DIR" in
+  "$HOME"/*) PATH_DIR="\$HOME${BIN_DIR#"$HOME"}" ;;
+  *) PATH_DIR="$BIN_DIR" ;;
+esac
+SHELL_NAME=$(basename "${SHELL:-sh}")
+case "$SHELL_NAME" in
+  zsh) RC="${ZDOTDIR:-$HOME}/.zshrc"; LINE="export PATH=\"$PATH_DIR:\$PATH\"" ;;
+  bash)
+    if [ -f "$HOME/.bash_profile" ]; then RC="$HOME/.bash_profile"; else RC="$HOME/.bashrc"; fi
+    LINE="export PATH=\"$PATH_DIR:\$PATH\"" ;;
+  fish) RC="$HOME/.config/fish/config.fish"; LINE="fish_add_path $PATH_DIR" ;;
+  *) RC="$HOME/.profile"; LINE="export PATH=\"$PATH_DIR:\$PATH\"" ;;
+esac
+if ! grep -qsF "$LINE" "$RC"; then
+  mkdir -p "$(dirname "$RC")"
+  printf '\n# %s\n%s\n' "$TOOL" "$LINE" >> "$RC"
+  echo "Added $PATH_DIR to PATH in $RC."
+fi
+if [ "$ON_PATH" = 0 ]; then
+  echo "Open a new terminal, or run:  $LINE"
 fi
 
-echo "Done — metroctl $VERSION ($CHANNEL channel) installed to $INSTALL_PATH"
-
-# Warn if some other metroctl earlier in PATH would still win.
-RESOLVED=$(command -v metroctl 2>/dev/null || true)
-if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$INSTALL_PATH" ]; then
-  echo "Warning: 'metroctl' still resolves to $RESOLVED, which shadows the new install."
-  echo "Remove that copy or fix your PATH, then run: hash -r"
+# Older copies elsewhere on PATH (e.g. /usr/local/bin from a previous installer).
+OLD=$(which -a "$TOOL" 2>/dev/null | grep -vxF "$BIN_DIR/$TOOL" | sort -u || true)
+if [ -n "$OLD" ]; then
+  echo "Note: other copies of $TOOL on your PATH (the new one comes first once PATH is updated):"
+  echo "$OLD" | sed 's/^/  /'
+  echo "Remove them if you don't need them (rm, or sudo rm if they're not yours)."
 fi

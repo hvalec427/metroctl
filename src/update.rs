@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const REPO: &str = "hvalec427/metroctl";
-const DEFAULT_INSTALL_PATH: &str = "/usr/local/bin/metroctl";
 const UA: &str = "metroctl-cli";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,7 +237,8 @@ pub fn install_target() -> PathBuf {
             return std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(p));
         }
     }
-    PathBuf::from(DEFAULT_INSTALL_PATH)
+    // Where install.sh puts it: ~/.metroctl/bin/metroctl.
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".metroctl/bin/metroctl")
 }
 
 pub fn needs_sudo(target: &std::path::Path) -> bool {

@@ -24,6 +24,9 @@ metroctl mcp      # MCP server for coding agents (see below)
 curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/master/install.sh | sh
 ```
 
+It installs to `~/.metroctl/bin/metroctl` (no sudo) and adds that folder to your PATH in
+your shell config (`INSTALL_DIR=…` installs elsewhere).
+
 Grab the binary from the [latest release](https://github.com/hvalec427/metroctl/releases/latest), or the bleeding edge with `… | sh -s -- dev`. Re-run the installer to update. Uninstall:
 
 ```sh
