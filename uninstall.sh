@@ -1,8 +1,8 @@
 #!/bin/sh
-# Remove metroctl from ~/.metroctl/bin and its PATH line.
+# Remove signalbox from ~/.signalbox/bin and its PATH line.
 set -e
 
-TOOL="metroctl"
+TOOL="signalbox"
 BIN_DIR="$HOME/.$TOOL/bin"
 
 if [ -f "$BIN_DIR/$TOOL" ]; then

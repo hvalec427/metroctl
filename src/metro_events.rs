@@ -1,11 +1,11 @@
-//! Watch a Metro that metroctl didn't start. Its real terminal output lives in
+//! Watch a Metro that signalbox didn't start. Its real terminal output lives in
 //! someone else's PTY, so instead we subscribe to the dev server's `/events`
 //! websocket (from @react-native-community/cli-server-api), which broadcasts
 //! every reporter event, and render a rough log of it: bundling progress, build
 //! results, bundling errors, server/client logs. The same socket also forwards
 //! commands (`reload`, `devMenu`) to connected apps.
 //!
-//! The watcher runs as the hidden `metroctl metro-events` subcommand inside a
+//! The watcher runs as the hidden `signalbox metro-events` subcommand inside a
 //! dashboard PTY tab, so it gets scrollback/colors like any other process.
 
 use serde_json::{json, Value};
@@ -71,11 +71,11 @@ pub fn send_command(port: u16, command: &str) -> bool {
     ok
 }
 
-/// `metroctl metro-events --port N`: print Metro's events until killed,
+/// `signalbox metro-events --port N`: print Metro's events until killed,
 /// reconnecting if Metro goes away and comes back.
 pub fn watch(port: u16) {
     println!("{CYAN}External Metro on :{port}{RESET} {DIM}({}){RESET}", describe_listener(port));
-    println!("{DIM}Started outside metroctl, so this is a rebuilt view of its bundler events, not its terminal.{RESET}");
+    println!("{DIM}Started outside signalbox, so this is a rebuilt view of its bundler events, not its terminal.{RESET}");
     println!("{DIM}R/D still reload / open the dev menu. Press m to take over (kill it and run Metro here).{RESET}\n");
     let mut r = Renderer::default();
     loop {
@@ -101,7 +101,7 @@ pub fn watch(port: u16) {
                     // Something holds the port but has no events socket (not a
                     // community-CLI Metro, or a different server entirely).
                     println!("{RED}Couldn't subscribe to Metro events on :{port}: {e}{RESET}");
-                    println!("{DIM}Press m to take over and run Metro inside metroctl.{RESET}");
+                    println!("{DIM}Press m to take over and run Metro inside signalbox.{RESET}");
                     while port_in_use(port) {
                         std::thread::sleep(Duration::from_secs(2));
                     }

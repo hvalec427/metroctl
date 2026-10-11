@@ -1,7 +1,7 @@
-//! `metroctl up`: a dashboard session set up for one checkout (usually a git
+//! `signalbox up`: a dashboard session set up for one checkout (usually a git
 //! worktree): its own Metro port, its own simulator, built and running on
-//! start. The session is described in `<root>/.metroctl/session.json` so other
-//! tools (orc, `metroctl down`) can find the port, simulator and process.
+//! start. The session is described in `<root>/.signalbox/session.json` so other
+//! tools (orc, `signalbox down`) can find the port, simulator and process.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,7 @@ pub struct Pinned {
     pub name: Option<String>, // device name, to tell its app apart from others on the same Metro
 }
 
-/// `.metroctl/session.json`.
+/// `.signalbox/session.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionFile {
     pub pid: u32,
@@ -69,7 +69,7 @@ pub struct SessionFile {
 }
 
 pub fn session_dir(root: &Path) -> PathBuf {
-    root.join(".metroctl")
+    root.join(".signalbox")
 }
 
 pub fn session_path(root: &Path) -> PathBuf {
@@ -102,24 +102,24 @@ pub fn remove_session(root: &Path) {
     let _ = std::fs::remove_file(session_path(root));
 }
 
-/// Keep `.metroctl/` out of git without touching the project's .gitignore.
+/// Keep `.signalbox/` out of git without touching the project's .gitignore.
 fn exclude_from_git(root: &Path) {
     let out = Command::new("git").arg("-C").arg(root).args(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]).output();
     let Some(path) = out.ok().filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim())) else {
         return;
     };
     let current = std::fs::read_to_string(&path).unwrap_or_default();
-    if current.lines().any(|l| l.trim() == ".metroctl/" || l.trim() == ".metroctl") {
+    if current.lines().any(|l| l.trim() == ".signalbox/" || l.trim() == ".signalbox") {
         return;
     }
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let sep = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
-    let _ = std::fs::write(&path, format!("{current}{sep}.metroctl/\n"));
+    let _ = std::fs::write(&path, format!("{current}{sep}.signalbox/\n"));
 }
 
-/// Every live session is also listed in `~/.config/metroctl/sessions/<pid>.json`,
+/// Every live session is also listed in `~/.config/signalbox/sessions/<pid>.json`,
 /// so `--port auto` can skip ports another session claimed but hasn't bound yet.
 fn global_dir() -> PathBuf {
     crate::rnconfig::rn_config_path().with_file_name("sessions")
@@ -187,8 +187,8 @@ pub fn reap_stale() -> Vec<String> {
     done
 }
 
-/// `metroctl gc`: clean up dead sessions; with `sims`, also delete
-/// `metroctl-*` simulators no running session owns.
+/// `signalbox gc`: clean up dead sessions; with `sims`, also delete
+/// `signalbox-*` simulators no running session owns.
 pub fn gc(sims: bool) -> Result<()> {
     let done = reap_stale();
     for d in &done {
@@ -200,7 +200,7 @@ pub fn gc(sims: bool) -> Result<()> {
         let v = simctl_json(&["list", "devices"])?;
         for d in v["devices"].as_object().into_iter().flat_map(|o| o.values()).flat_map(|l| l.as_array().into_iter().flatten()) {
             let (name, udid) = (d["name"].as_str().unwrap_or(""), d["udid"].as_str().unwrap_or(""));
-            if name.starts_with("metroctl-") && !name.starts_with(TEMPLATE_PREFIX) && !owned.iter().any(|o| o == udid) {
+            if name.starts_with("signalbox-") && !name.starts_with(TEMPLATE_PREFIX) && !owned.iter().any(|o| o == udid) {
                 delete_simulator(udid)?;
                 println!("deleted orphaned simulator {name} ({udid})");
                 n += 1;
@@ -300,7 +300,7 @@ fn pick_sim(runtimes: &Value, runtime: Option<&str>, device: Option<&str>) -> Re
 
 /// Create a simulator; returns (udid, "iPhone 17 · iOS 26.0").
 /// Name prefix of the settled simulators new ones are cloned from.
-const TEMPLATE_PREFIX: &str = "metroctl-template";
+const TEMPLATE_PREFIX: &str = "signalbox-template";
 
 fn simctl_out(args: &[&str]) -> Result<String> {
     let out = Command::new("xcrun").arg("simctl").args(args).output()?;
@@ -452,7 +452,7 @@ pub fn adb_serials() -> Vec<String> {
     text.lines().skip(1).filter_map(|l| l.split_once('\t')).filter(|(_, s)| s.trim() == "device").map(|(d, _)| d.to_string()).collect()
 }
 
-/// The device `up --device` names, resolved like simon and touchctl do (iOS
+/// The device `up --device` names, resolved like simon and boop do (iOS
 /// udid, AVD name, adb serial, or a name only one device has). A stopped
 /// emulator is started; a stopped simulator gets booted with the session.
 pub fn pin_device(id: &str, cleanup: SimCleanup) -> Result<Pinned> {
@@ -546,16 +546,16 @@ pub fn boot_command(udid: &str) -> String {
     )
 }
 
-/// A simulator name from the checkout dir: `metroctl-<dir>`.
+/// A simulator name from the checkout dir: `signalbox-<dir>`.
 pub fn default_sim_name(root: &Path) -> String {
     let dir = root.file_name().and_then(|n| n.to_str()).unwrap_or("app");
-    format!("metroctl-{dir}")
+    format!("signalbox-{dir}")
 }
 
-/// `metroctl down`: stop the session running in `root` and (unless `keep_sim`)
+/// `signalbox down`: stop the session running in `root` and (unless `keep_sim`)
 /// delete the simulator it created.
 pub fn down(root: &Path, keep_sim: bool) -> Result<()> {
-    let s = read_session(root).ok_or_else(|| anyhow!("no metroctl session in {}", root.display()))?;
+    let s = read_session(root).ok_or_else(|| anyhow!("no signalbox session in {}", root.display()))?;
     if pid_alive(s.pid) {
         let _ = Command::new("kill").args(["-TERM", &s.pid.to_string()]).output();
         let t = Instant::now();
@@ -565,7 +565,7 @@ pub fn down(root: &Path, keep_sim: bool) -> Result<()> {
         if pid_alive(s.pid) {
             let _ = Command::new("kill").args(["-KILL", &s.pid.to_string()]).output();
         }
-        println!("stopped metroctl (pid {})", s.pid);
+        println!("stopped signalbox (pid {})", s.pid);
     }
     // Metro normally dies with its PTY; make sure the port is free.
     if crate::metro_events::port_in_use(s.port) {

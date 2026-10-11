@@ -1,4 +1,4 @@
-//! React Native project config (`~/.config/metroctl/config.json`): a registry of
+//! React Native project config (`~/.config/signalbox/config.json`): a registry of
 //! projects keyed by repo root, each describing how to run Metro and how to
 //! build/run iOS and Android (serde with camelCase names).
 
@@ -152,7 +152,7 @@ impl DeepLink {
 /// `command` may contain a `{udid}` (iOS) / `{serial}` (Android) placeholder,
 /// substituted with the selected device so it lands in the right spot — e.g.
 /// `"react-native run-ios --udid {udid} --scheme Foo -- --reset-cache"`. Without
-/// a placeholder metroctl appends `--udid`/`--deviceId`, which a `-- …`
+/// a placeholder signalbox appends `--udid`/`--deviceId`, which a `-- …`
 /// passthrough in the script would send to the wrong side.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlatformConfig {
@@ -269,7 +269,7 @@ impl ProjectConfig {
             .unwrap_or_else(|| format!("{} && npx pod-install", self.package_manager().install_command()))
     }
 
-    /// Env for every command metroctl spawns: the Metro port exported as
+    /// Env for every command signalbox spawns: the Metro port exported as
     /// `RCT_METRO_PORT`, so the port is configured in exactly one place (`metro.port`).
     pub fn command_env(&self) -> BTreeMap<String, String> {
         let mut env = BTreeMap::new();
@@ -285,8 +285,19 @@ pub struct RnConfig {
 }
 
 pub fn rn_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".config/metroctl/config.json")
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let dir = home.join(".config/signalbox");
+    // Projects registered before the rename (metroctl) move over once.
+    let old = home.join(".config/metroctl");
+    if !dir.exists() && old.exists() {
+        let _ = std::fs::rename(&old, &dir);
+    }
+    dir.join("config.json")
+}
+
+/// `$SIGNALBOX_<name>`, or `$METROCTL_<name>` from before the rename.
+pub fn env(name: &str) -> Option<String> {
+    [format!("SIGNALBOX_{name}"), format!("METROCTL_{name}")].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
 }
 
 pub fn load_rn_config() -> Result<Option<RnConfig>> {

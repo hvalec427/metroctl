@@ -1,12 +1,12 @@
 [package]
-name = "metroctl"
+name = "signalbox"
 version = "0.0.0"
 edition = "2021"
 description = "React Native project dashboard (Metro, devices, logs) — built on simon"
-default-run = "metroctl"
+default-run = "signalbox"
 
 [[bin]]
-name = "metroctl"
+name = "signalbox"
 path = "src/main.rs"
 
 [dependencies]

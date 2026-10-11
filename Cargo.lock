@@ -1030,26 +1030,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metroctl"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm 0.28.1",
- "inquire",
- "portable-pty",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "signal-hook",
- "simon",
- "sourcemap",
- "tungstenite",
- "vt100",
-]
-
-[[package]]
 name = "mio"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1709,6 +1689,26 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "signalbox"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm 0.28.1",
+ "inquire",
+ "portable-pty",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "simon",
+ "sourcemap",
+ "tungstenite",
+ "vt100",
 ]
 
 [[package]]

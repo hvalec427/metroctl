@@ -1,7 +1,7 @@
 //! The React Native log viewer as an embeddable component. Holds the per-device
 //! Logs / Network / Perf state, reduces `RnEvent`s from `RnClient`, and renders
 //! itself into an arbitrary `Rect` (the full screen for `logs --rn`, a pane in
-//! `metroctl`). Extracted from the old `rntui` so both share one implementation.
+//! `signalbox`). Extracted from the old `rntui` so both share one implementation.
 
 use crate::rnclient::{format_js, ConnCmd, FRAMEWORK_FRAME, LogEntry, NetRecord, PausedInfo, RnClient, RnEvent, Status, TargetInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

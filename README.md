@@ -1,4 +1,4 @@
-# metroctl
+# signalbox
 
 Run and manage a whole React Native project from a single terminal window: start
 and drive Metro, boot simulators/emulators, build & run the app on them, forward
@@ -7,33 +7,39 @@ all at once. Built on top of [simon](https://github.com/hvalec427/simon) for
 device management.
 
 ```sh
-metroctl init     # register the current directory as a project
-metroctl          # open the dashboard for the current project
-metroctl config   # print the config file path
-metroctl logs     # just the React Native log viewer (see docs/logs.md)
-metroctl up …     # dashboard set up for this checkout (port, simulator, build)
-metroctl down     # stop the `up` session in this checkout
-metroctl gc       # clean up after sessions that died (--sims: orphaned simulators)
-metroctl sim new --name X   # clone a ready simulator from the template, print its udid (yours to delete)
-metroctl mcp      # MCP server for coding agents (see below)
+signalbox init     # register the current directory as a project
+signalbox          # open the dashboard for the current project
+signalbox config   # print the config file path
+signalbox logs     # just the React Native log viewer (see docs/logs.md)
+signalbox up …     # dashboard set up for this checkout (port, simulator, build)
+signalbox down     # stop the `up` session in this checkout
+signalbox gc       # clean up after sessions that died (--sims: orphaned simulators)
+signalbox sim new --name X   # clone a ready simulator from the template, print its udid (yours to delete)
+signalbox mcp      # MCP server for coding agents (see below)
 ```
 
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hvalec427/signalbox/master/install.sh | sh
 ```
 
-It installs to `~/.metroctl/bin/metroctl` (no sudo) and adds that folder to your PATH in
+It installs to `~/.signalbox/bin/signalbox` (no sudo) and adds that folder to your PATH in
 your shell config.
 
-Grab the binary from the [latest release](https://github.com/hvalec427/metroctl/releases/latest), or the bleeding edge with `… | sh -s -- dev`. Re-run the installer to update. Uninstall:
+Grab the binary from the [latest release](https://github.com/hvalec427/signalbox/releases/latest), or the bleeding edge with
+`curl -fsSL https://raw.githubusercontent.com/hvalec427/signalbox/develop/install.sh | sh -s -- dev`.
+Re-run the installer to update. Uninstall:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hvalec427/metroctl/master/uninstall.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hvalec427/signalbox/master/uninstall.sh | sh
 ```
 
-Prefer source? `cargo install --git https://github.com/hvalec427/metroctl`.
+Prefer source? `cargo install --git https://github.com/hvalec427/signalbox`.
+
+signalbox was called metroctl. The installer removes an old metroctl install,
+your registered projects move from `~/.config/metroctl` on first run, and the
+old `METROCTL_*` environment variables still work.
 
 > **macOS only.** Booting simulators and streaming device logs rely on macOS
 > tooling (`xcrun`, `simctl`, `adb`), via simon.
@@ -43,28 +49,28 @@ Prefer source? `cargo install --git https://github.com/hvalec427/metroctl`.
 1. From your project root, register it:
    ```sh
    cd ~/dev/my-rn-app
-   metroctl init          # adds this project to ~/.config/metroctl/config.json
+   signalbox init          # adds this project to ~/.config/signalbox/config.json
    ```
    `init` detects your package manager and prints the commands it will run, so for
    a standard project you're already done.
-2. (Optional) Open the config to customize — `metroctl config` prints its path:
+2. (Optional) Open the config to customize — `signalbox config` prints its path:
    ```sh
-   $EDITOR "$(metroctl config | head -1)"
+   $EDITOR "$(signalbox config | head -1)"
    ```
    See the [field reference](#field-reference) below. A minimal entry is just a
    `name` and `root`; everything else has a default.
 3. From anywhere inside the project, launch the dashboard:
    ```sh
-   metroctl
+   signalbox
    ```
 
 ## Config
 
-Projects live in `~/.config/metroctl/config.json`, a registry keyed by repo root.
-metroctl picks the project whose `root` is a prefix of your current directory,
-so you just `cd` into a repo and run `metroctl`.
+Projects live in `~/.config/signalbox/config.json`, a registry keyed by repo root.
+signalbox picks the project whose `root` is a prefix of your current directory,
+so you just `cd` into a repo and run `signalbox`.
 
-`metroctl init` scaffolds a minimal entry; everything else falls back to sensible
+`signalbox init` scaffolds a minimal entry; everything else falls back to sensible
 defaults derived from your package manager (detected from the lockfile). A full
 entry looks like:
 
@@ -95,20 +101,20 @@ Anything omitted is derived:
 | yarn | `yarn start` | `yarn ios` | `yarn android` |
 | pnpm | `pnpm start` | `pnpm ios` | `pnpm android` |
 
-**Port in one place.** Set `metro.port` and nothing else — metroctl connects its log
+**Port in one place.** Set `metro.port` and nothing else — signalbox connects its log
 feed to that port *and* exports it as `RCT_METRO_PORT` into every command it runs,
 so Metro and your builds use the same port. It defaults to `8081`.
 
 **Which device?** Pick one live from the Devices pane (`j`/`k` to select) and press
 `⏎` to build & run on it. If it's a sim/emulator that isn't up yet, `⏎` boots it
 first — press `⏎` again once it shows `● running` (its id isn't known until then,
-and building early targets the wrong device). metroctl targets your pick with
+and building early targets the wrong device). signalbox targets your pick with
 `--udid` (iOS) and `--deviceId` + the `ANDROID_SERIAL` env (Android).
 
 If your build script ends in a `-- …` passthrough, an appended `--udid`/`--deviceId`
 would land on the wrong side of the `--` and be ignored. Put a **`{udid}`** (iOS) /
 **`{serial}`** (Android) placeholder in `ios.command` / `android.command` instead, so
-it lands exactly where you want — metroctl substitutes the selected device:
+it lands exactly where you want — signalbox substitutes the selected device:
 
 ```json
 "ios": { "command": "npx react-native run-ios --udid {udid} --scheme 'MyApp' -- --reset-cache" }
@@ -144,7 +150,7 @@ Three tiled panes plus a status bar:
   is set, each running device also shows whether the app is installed (`app✓`/
   `app✗`) and whether it's in the foreground (`▶fg`). (iOS can't report these over
   the available tooling, so they're Android-only.)
-- **JS Logs / Network / Perf** — the full `metroctl logs` viewer embedded (see
+- **JS Logs / Network / Perf** — the full `signalbox logs` viewer embedded (see
   [docs/logs.md](docs/logs.md) for its keys).
 
 ### Keys
@@ -194,23 +200,23 @@ falls back to a CDP reload when Metro isn't running under simon).
 
 ## Isolated sessions (`up` / `down`)
 
-`metroctl up` opens the dashboard and gets the app running on its own port and
+`signalbox up` opens the dashboard and gets the app running on its own port and
 simulator, so several checkouts (e.g. git worktrees) can run side by side:
 
 ```sh
-metroctl up --port auto --new-sim     # free port, new simulator, Metro, build
-metroctl up --port 8090 --device <id>   # iOS udid, AVD name, adb serial, or a unique name
-metroctl down                         # from another shell: stop it, delete its simulator
+signalbox up --port auto --new-sim     # free port, new simulator, Metro, build
+signalbox up --port 8090 --device <id>   # iOS udid, AVD name, adb serial, or a unique name
+signalbox down                         # from another shell: stop it, delete its simulator
 ```
 
 - `--port auto` picks the first free port from the configured one, skipping
   ports other sessions have claimed. The port reaches the build through
   `RCT_METRO_PORT`, so each app talks to its own Metro.
-- `--new-sim [NAME]` creates a simulator (default `metroctl-<dir>`) using the
+- `--new-sim [NAME]` creates a simulator (default `signalbox-<dir>`) using the
   newest iOS runtime and the newest plain iPhone. It's cloned from a settled
-  template (`metroctl-template …`, built once per device type and iOS version),
+  template (`signalbox-template …`, built once per device type and iOS version),
   because a freshly created simulator takes minutes before it can launch apps. Override them with
-  `--sim-type "iPhone 16 Pro"` / `--sim-runtime 18.2`. On quit, metroctl asks
+  `--sim-type "iPhone 16 Pro"` / `--sim-runtime 18.2`. On quit, signalbox asks
   whether to delete it (`--sim-cleanup ask|delete|keep`).
 - `--install` installs JS deps and pods first.
 - `--prebuilt` skips the native build: it installs the app the main checkout
@@ -220,24 +226,24 @@ metroctl down                         # from another shell: stop it, delete its 
 - Steps run in order: install and simulator boot run in parallel, then Metro
   starts, then the build runs once Metro answers. Each step gets its own
   process tab.
-- In a git worktree of a registered project, metroctl uses that project's
+- In a git worktree of a registered project, signalbox uses that project's
   config with its root moved into the worktree. No `init` is needed.
-- The running session is described in `.metroctl/session.json` (pid, port,
+- The running session is described in `.signalbox/session.json` (pid, port,
   udid, status), which is git-excluded.
 
 - Sessions that die without cleaning up (killed, crashed) are reaped the
-  next time `up` runs, or with `metroctl gc`: their simulator is deleted if
-  metroctl created it, otherwise the app is stopped and its port setting reset.
-  `gc --sims` also deletes `metroctl-*` simulators no running session owns.
+  next time `up` runs, or with `signalbox gc`: their simulator is deleted if
+  signalbox created it, otherwise the app is stopped and its port setting reset.
+  `gc --sims` also deletes `signalbox-*` simulators no running session owns.
 
-## Agents (`metroctl mcp`)
+## Agents (`signalbox mcp`)
 
-Every dashboard serves a control socket (path in `.metroctl/session.json`).
-`metroctl ctl <cmd> [json]` sends it one command; `metroctl mcp` is an MCP
+Every dashboard serves a control socket (path in `.signalbox/session.json`).
+`signalbox ctl <cmd> [json]` sends it one command; `signalbox mcp` is an MCP
 server on top of it for coding agents:
 
 ```json
-{ "mcpServers": { "metroctl": { "command": "metroctl", "args": ["mcp"] } } }
+{ "mcpServers": { "signalbox": { "command": "signalbox", "args": ["mcp"] } } }
 ```
 
 | Tool | |
@@ -246,11 +252,11 @@ server on top of it for coding agents:
 | `logs`, `errors`, `network`, `request` | JS console, failures, requests (`since` for only new entries) |
 | `output` | last lines of a process tab (build errors) |
 | `reload`, `rebuild`, `restart_metro` | drive the session |
-| `deeplinks` | the configured deep links (open them with `touchctl open`) |
+| `deeplinks` | the configured deep links (open them with `boop open`) |
 
 To see and use the app's screen (screenshots, element tree, taps, typing,
-deep links), use [touchctl](https://github.com/hvalec427/touchctl). Point it at
-the session's device with `touchctl --device-from .metroctl/session.json …`.
+deep links), use [boop](https://github.com/hvalec427/boop). Point it at
+the session's device with `boop --device-from .signalbox/session.json …`.
 
 ## Contributing
 

@@ -3,7 +3,7 @@
 **orc** is a TUI for working on several features of a React Native app at
 once. Each feature request gets its own git worktree, Metro port, iOS
 simulator and Claude Code agent. You talk to every agent from the orc TUI.
-metroctl does the React Native work, and it stays a standalone tool that
+signalbox does the React Native work, and it stays a standalone tool that
 works without orc.
 
 Scope for now: iOS simulators only, Claude Code only.
@@ -13,7 +13,7 @@ Scope for now: iOS simulators only, Claude Code only.
 ```
 tmux session "orc"
 ├─ window 0: orc TUI              (requests list + agent chat; normal work happens here)
-├─ window "feature-a"             (metroctl up …, only for manual debugging)
+├─ window "feature-a"             (signalbox up …, only for manual debugging)
 └─ window "feature-b" …
 ```
 
@@ -22,7 +22,7 @@ tmux session "orc"
   agents' messages and sends replies, so you don't need to switch windows for
   normal work. Quitting the TUI leaves the agents working. Reopening it
   reattaches and replays each conversation from orcd.
-- metroctl runs in its own tmux window for each request. You only go there to
+- signalbox runs in its own tmux window for each request. You only go there to
   debug by hand (`⏎`/`g` in orc jumps there). Its Metro, simulator and logs
   keep running while you're in orc.
 - When started outside tmux, orc creates or attaches to the `orc` session and
@@ -35,7 +35,7 @@ tmux session "orc"
   in the tmux session. A launchd agent can come later if it should survive
   logout or reboot.
 - It owns everything long-lived: the `claude` processes, their transcripts,
-  the request registry, worktree/metroctl setup and teardown, and the
+  the request registry, worktree/signalbox setup and teardown, and the
   permission-prompt MCP tool (approvals wait in orcd until you answer them in
   the TUI).
 - The TUI talks to it over `~/.config/orc/orcd.sock` (JSON lines). It sends
@@ -69,18 +69,18 @@ tmux session "orc"
    the worktree's own branch. Copying `ios/build` instead works, but goes
    stale if the branch changes native code. Measured on myapp:
    cloning `node_modules` 19s, `ios/Pods` 8s, then `pod install` 27s.
-4. **metroctl window:** `tmux new-window -d -n <slug> -c <worktree>
-   'metroctl up --port auto --sim new'`. This picks a port, creates and boots
+4. **signalbox window:** `tmux new-window -d -n <slug> -c <worktree>
+   'signalbox up --port auto --sim new'`. This picks a port, creates and boots
    a simulator, starts Metro and builds onto the simulator.
 5. **Agent:** orcd starts `claude -p --input-format stream-json --output-format
    stream-json --verbose` in the worktree with the prompt. Its `.mcp.json`
-   points at `metroctl mcp`. Store the `session_id` so the agent can be
+   points at `signalbox mcp`. Store the `session_id` so the agent can be
    resumed with `--resume` after orc restarts.
 6. **Track:** status comes from the agent stream plus
-   `.metroctl/session.json` and metroctl's control socket. Statuses: setting
+   `.signalbox/session.json` and signalbox's control socket. Statuses: setting
    up → building → agent working → waiting for you → done.
 7. **Review:** read the chat, look at the simulator, view the diff, open a PR.
-8. **Tear down:** `metroctl down` (stops Metro, deletes the simulator), kill
+8. **Tear down:** `signalbox down` (stops Metro, deletes the simulator), kill
    the window, `git worktree remove`, and optionally delete the branch.
 
 orc's own state is a small registry (`~/.config/orc/requests.json`: slug,
@@ -96,59 +96,59 @@ back from the processes.
 - **Permission prompts:** the agent's tool approvals are shown in orc. Use
   `--permission-prompt-tool` (an MCP tool served by orc) so approve/deny
   happens in the TUI, or start agents with a pre-approved allowlist.
-- **Keys:** `n` new request, `g` go to the metroctl window, `d` diff,
+- **Keys:** `n` new request, `g` go to the signalbox window, `d` diff,
   `x` tear down, `?` help.
 
-## How the agent uses metroctl
+## How the agent uses signalbox
 
-- `.mcp.json` in the worktree runs `metroctl mcp`, a stdio MCP server. It
-  finds the running metroctl through `.metroctl/session.json` and talks to it
+- `.mcp.json` in the worktree runs `signalbox mcp`, a stdio MCP server. It
+  finds the running signalbox through `.signalbox/session.json` and talks to it
   over the control socket.
 - Tools: `status`, `logs(level, filter, since)`, `errors`,
   `network(failed_only, filter)`, `reload`, `rebuild`, `restart_metro`,
   `screenshot`, `open_deeplink`. Later: tap/type through Maestro or idb.
 - Outputs are compact and filtered so they don't fill the agent's context.
 
-## metroctl changes (do first, all optional for standalone use)
+## signalbox changes (do first, all optional for standalone use)
 
 1. **Worktree project resolution.** If the cwd isn't registered, find the main
    checkout with `git rev-parse --git-common-dir` and use its project config
    with `root` = cwd.
-2. **`metroctl up`**, the dashboard plus startup flags:
+2. **`signalbox up`**, the dashboard plus startup flags:
    - `--port <n|auto>`: override `metro.port` (and therefore `RCT_METRO_PORT`).
      `auto` picks the first free port starting at 8081.
    - `--device <udid>`: preselect and pin to that device.
    - `--sim new[=<name>]`: create a simulator (simon `create_simulator`, using
      the newest runtime and a default iPhone, both overridable), boot it, and
-     pin to it. Name it `metroctl-<dir>`.
+     pin to it. Name it `signalbox-<dir>`.
    - `--install`: run `install_command()` first. orc copies dependencies
      instead, so it doesn't pass this.
    - Once set up: start Metro, then build onto the pinned device after it has
      booted. Each step runs as a normal process tab.
-3. **Session file:** write `.metroctl/session.json` (pid, project root, port,
+3. **Session file:** write `.signalbox/session.json` (pid, project root, port,
    udid, created_sim, socket path, status) and remove it on exit. Ignore it
    through `.git/info/exclude`, so the project's `.gitignore` isn't touched.
-4. **Simulator cleanup:** on quit, delete a simulator metroctl created
-   (`--sim-cleanup=delete|keep|ask`, default ask). Add `metroctl down` to stop
+4. **Simulator cleanup:** on quit, delete a simulator signalbox created
+   (`--sim-cleanup=delete|keep|ask`, default ask). Add `signalbox down` to stop
    it from outside.
-5. **Control socket:** a Unix socket at `.metroctl/control.sock` that speaks
+5. **Control socket:** a Unix socket at `.signalbox/control.sock` that speaks
    JSON lines. It serves status, logs, errors and network from the dashboard's
    in-memory buffers, plus reload, rebuild and restart_metro.
 Learned while testing on myapp: with React Native's prebuilt
 core, the port passed at build time (`RCT_METRO_PORT`) is ignored and the app
-still loads from 8081. metroctl therefore sets `RCT_jsLocation=localhost:<port>`
+still loads from 8081. signalbox therefore sets `RCT_jsLocation=localhost:<port>`
 for the app on the simulator after every successful iOS simulator build, and
 relaunches the app if the setting changed. This needs `ios.bundleId` in the
 config.
 
-6. **`metroctl mcp`:** a stdio MCP server that forwards to the control socket,
+6. **`signalbox mcp`:** a stdio MCP server that forwards to the control socket,
    plus `screenshot` (`xcrun simctl io <udid> screenshot`).
 
-Plain `metroctl` with no flags behaves exactly as it does today.
+Plain `signalbox` with no flags behaves exactly as it does today.
 
 ## Next: agents control simulators and devices
 
-Moved out of metroctl into its own tool, [touchctl](https://github.com/hvalec427/touchctl)
+Moved out of signalbox into its own tool, [boop](https://github.com/hvalec427/boop)
 (CLI, used by agents through Bash; no MCP server). The original design notes:
 
 UI control so an agent can drive the app it's working on, not just look at
@@ -175,6 +175,6 @@ it. No Maestro.
   while WDA isn't built yet.
 - WebDriverAgent has to be built and running on the simulator or phone
   (`xcodebuild test-without-building` with the WDA runner, port-forwarded with
-  `iproxy`). metroctl should start and track it like the other processes.
+  `iproxy`). signalbox should start and track it like the other processes.
 - Check tools at startup and report what's missing (`brew install
   cameroncooke/axe/axe`, adb from the Android SDK, WDA).

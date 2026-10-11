@@ -1,4 +1,4 @@
-//! metroctl — a single-window React Native project dashboard (Metro, device
+//! signalbox — a single-window React Native project dashboard (Metro, device
 //! build/run, JS logs/network/perf), built on top of `simon` for device
 //! management. No subcommand opens the dashboard; `logs` is the standalone
 //! React Native log viewer; `init`/`config` manage the project registry.
@@ -22,7 +22,7 @@ use clap::{Parser, Subcommand};
 use std::io::IsTerminal;
 
 #[derive(Parser)]
-#[command(name = "metroctl", version, about = "React Native project dashboard")]
+#[command(name = "signalbox", version, about = "React Native project dashboard")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -43,7 +43,7 @@ enum Command {
         /// Pin to an existing device: iOS udid, AVD name, adb serial, or a name only one device has; started if needed
         #[arg(long, conflicts_with = "new_sim")]
         device: Option<String>,
-        /// Create a new simulator for this session (default name: metroctl-<dir>)
+        /// Create a new simulator for this session (default name: signalbox-<dir>)
         #[arg(long = "new-sim", value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
         new_sim: Option<String>,
         /// Device type for --new-sim, e.g. "iPhone 16 Pro" (default: newest plain iPhone)
@@ -68,13 +68,13 @@ enum Command {
         #[command(subcommand)]
         action: SimAction,
     },
-    /// Clean up after metroctl sessions that died (simulators, app port settings)
+    /// Clean up after signalbox sessions that died (simulators, app port settings)
     Gc {
-        /// Also delete `metroctl-*` simulators no running session owns
+        /// Also delete `signalbox-*` simulators no running session owns
         #[arg(long)]
         sims: bool,
     },
-    /// Stop the metroctl session running in this checkout and delete the simulator it created
+    /// Stop the signalbox session running in this checkout and delete the simulator it created
     Down {
         /// Keep the simulator
         #[arg(long = "keep-sim")]
@@ -105,7 +105,7 @@ enum Command {
         #[arg(long, default_value_t = 8081)]
         port: u16,
     },
-    /// Check whether a newer version of metroctl is available
+    /// Check whether a newer version of signalbox is available
     #[command(name = "check-update")]
     CheckUpdate {
         #[arg(long)]
@@ -115,7 +115,7 @@ enum Command {
         #[arg(long)]
         dev: bool,
     },
-    /// Update metroctl to the latest version (stays on the installed build's channel)
+    /// Update signalbox to the latest version (stays on the installed build's channel)
     Update {
         #[arg(long)]
         stable: bool,

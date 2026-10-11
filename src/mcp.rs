@@ -1,10 +1,10 @@
-//! `metroctl mcp`: a stdio MCP server for coding agents. It talks to the
+//! `signalbox mcp`: a stdio MCP server for coding agents. It talks to the
 //! dashboard running in the agent's checkout through its control socket (found
-//! via `.metroctl/session.json`), and formats replies as compact text so they
+//! via `.signalbox/session.json`), and formats replies as compact text so they
 //! don't flood the agent's context.
 //!
 //! Register it in a project's `.mcp.json`:
-//! `{"mcpServers": {"metroctl": {"command": "metroctl", "args": ["mcp"]}}}`
+//! `{"mcpServers": {"signalbox": {"command": "signalbox", "args": ["mcp"]}}}`
 
 use crate::control;
 use anyhow::{bail, Result};
@@ -32,10 +32,10 @@ pub fn run() {
             "initialize" => json!({
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or(PROTOCOL),
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "metroctl", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Inspect and drive the React Native app running in this checkout's metroctl session: \
+                "serverInfo": { "name": "signalbox", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": "Inspect and drive the React Native app running in this checkout's signalbox session: \
                     JS console logs, errors, network requests, reload and rebuild. \
-                    To see or use the app's screen (screenshots, taps, typing) use the `touchctl` command line. \
+                    To see or use the app's screen (screenshots, taps, typing) use the `boop` command line. \
                     After a JS change Fast Refresh applies it; use reload if state looks stale and rebuild after native changes \
                     (Podfile, ios/, native modules). Use `since` with the `next` value from a previous call to see only new entries.",
             }),
@@ -90,7 +90,7 @@ fn tools() -> Value {
         { "name": "reload", "description": "Reload the app's JS bundle.", "inputSchema": obj(json!({})) },
         { "name": "rebuild", "description": "Rebuild and reinstall the native app on the session's simulator (needed after native changes). Waits for the result.",
           "inputSchema": obj(json!({ "wait": { "type": "boolean", "description": "Wait for the build to finish (default true)" } })) },
-        { "name": "deeplinks", "description": "The app's deep links from the project config. Fill <placeholders> (e.g. a uuid or token from the task) and open one with `touchctl open <url>`.", "inputSchema": obj(json!({})) },
+        { "name": "deeplinks", "description": "The app's deep links from the project config. Fill <placeholders> (e.g. a uuid or token from the task) and open one with `boop open <url>`.", "inputSchema": obj(json!({})) },
         { "name": "restart_metro", "description": "Restart Metro (e.g. after changing metro.config.js or installing JS deps).", "inputSchema": obj(json!({})) },
     ])
 }
@@ -174,7 +174,7 @@ fn rebuild(wait: bool) -> Result<Vec<Value>> {
 fn wait_ready(timeout_s: u64) -> Result<Vec<Value>> {
     let start = Instant::now();
     loop {
-        // The session appears only once metroctl has its simulator (creating
+        // The session appears only once signalbox has its simulator (creating
         // the first clone template takes minutes): wait for it, too.
         let s = match ask("status", json!({})) {
             Ok(s) => s,

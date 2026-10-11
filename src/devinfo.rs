@@ -117,7 +117,7 @@ pub struct IosDetail {
 /// Model, connection and readiness for connected iOS devices, keyed by udid
 /// (from `devicectl`; empty without Xcode).
 pub fn ios_physical() -> HashMap<String, IosDetail> {
-    let tmp = std::env::temp_dir().join("metroctl-devicectl.json");
+    let tmp = std::env::temp_dir().join("signalbox-devicectl.json");
     let ok = Command::new("xcrun").args(["devicectl", "list", "devices", "--json-output"]).arg(&tmp).output().map(|o| o.status.success()).unwrap_or(false);
     let data: serde_json::Value = match ok.then(|| std::fs::read(&tmp).ok()).flatten().and_then(|r| serde_json::from_slice(&r).ok()) {
         Some(d) => d,

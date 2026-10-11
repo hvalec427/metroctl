@@ -3,7 +3,7 @@
 # tagged with the UTC date (e.g. 0.2.0-nightly.20261008) — one build per day.
 set -euo pipefail
 
-REPO="hvalec427/metroctl"
+REPO="hvalec427/signalbox"
 
 # Base = the version the next stable release will get; LATEST is for notes.
 # Authenticated: Actions runners share IPs and hit the anonymous rate limit (403).
@@ -47,11 +47,11 @@ NOTES=$(mktemp)
   echo "### Install this build"
   echo
   echo '```sh'
-  echo "curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/metroctl-darwin-arm64 -o metroctl \\"
-  echo "  && chmod +x metroctl && sudo mv metroctl /usr/local/bin/metroctl"
+  echo "curl -fsSL https://github.com/${REPO}/releases/download/${TAG}/signalbox-darwin-arm64 -o signalbox \\"
+  echo "  && chmod +x signalbox && sudo mv signalbox /usr/local/bin/signalbox"
   echo '```'
   echo
-  echo "_Apple Silicon shown; on Intel use \`metroctl-darwin-x64\`. Already installed? \`metroctl update --nightly\`._"
+  echo "_Apple Silicon shown; on Intel use \`signalbox-darwin-x64\`. Already installed? \`signalbox update --nightly\`._"
 } > "${NOTES}"
 
 # A nightly already cut today is replaced, so the day's last build wins.
@@ -65,4 +65,4 @@ gh release create "${TAG}" \
   --target "$(git rev-parse HEAD)" \
   --title "${TAG}" \
   --notes-file "${NOTES}" \
-  metroctl-darwin-arm64 metroctl-darwin-x64
+  signalbox-darwin-arm64 signalbox-darwin-x64

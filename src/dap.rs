@@ -1,8 +1,8 @@
 //! A minimal Debug Adapter Protocol server. Any DAP client (nvim-dap, VSCode)
-//! connects over TCP and drives the single Hermes debugger this metroctl owns —
-//! so the editor shows the paused code + call stack while metroctl stays the
+//! connects over TCP and drives the single Hermes debugger this signalbox owns —
+//! so the editor shows the paused code + call stack while signalbox stays the
 //! sole CDP client. Started from `RnClient::start`, listening on 9223 by default
-//! (override with METROCTL_DAP_PORT).
+//! (override with SIGNALBOX_DAP_PORT).
 //!
 //! Phase 2a: attach, stop/continue/step, stackTrace from the paused frames.
 //! Breakpoints set from the editor (source-map mapping) and scopes/variables
@@ -22,14 +22,14 @@ type Senders = Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>;
 type Writer = Arc<Mutex<TcpStream>>;
 type Seq = Arc<Mutex<i64>>;
 
-/// Bind the DAP port (9223, or `METROCTL_DAP_PORT`). On failure, says why —
-/// usually another metroctl (or anything else) already holding the port, in
+/// Bind the DAP port (9223, or `SIGNALBOX_DAP_PORT`). On failure, says why —
+/// usually another signalbox (or anything else) already holding the port, in
 /// which case editors would attach to *that* one.
 pub fn bind() -> Result<TcpListener, String> {
-    let port: u16 = std::env::var("METROCTL_DAP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9223);
+    let port: u16 = crate::rnconfig::env("DAP_PORT").and_then(|s| s.parse().ok()).unwrap_or(9223);
     TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
-            format!("debugger off: :{port} is taken by {} (set METROCTL_DAP_PORT to use another)", crate::metro_events::describe_listener(port))
+            format!("debugger off: :{port} is taken by {} (set SIGNALBOX_DAP_PORT to use another)", crate::metro_events::describe_listener(port))
         } else {
             format!("debugger off: can't listen on :{port}: {e}")
         }

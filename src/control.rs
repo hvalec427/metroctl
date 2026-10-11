@@ -1,6 +1,6 @@
 //! The dashboard's control socket: a Unix socket (path in
-//! `.metroctl/session.json`) speaking JSON lines, so other tools — `metroctl
-//! mcp` for agents, `metroctl ctl` by hand — can read the session's logs,
+//! `.signalbox/session.json`) speaking JSON lines, so other tools — `signalbox
+//! mcp` for agents, `signalbox ctl` by hand — can read the session's logs,
 //! network and process output and drive it (reload, rebuild, restart Metro).
 //!
 //! Request: `{"cmd": "logs", "args": {"level": "error"}}`, one per line.
@@ -23,7 +23,7 @@ pub struct Request {
 
 /// Per-process socket path (kept short: Unix socket paths max out ~104 bytes).
 pub fn socket_path() -> PathBuf {
-    std::env::temp_dir().join(format!("metroctl-{}.sock", std::process::id()))
+    std::env::temp_dir().join(format!("signalbox-{}.sock", std::process::id()))
 }
 
 /// Listen on `path`, forwarding each request to `tx`.
@@ -70,13 +70,13 @@ fn handle(stream: UnixStream, tx: Sender<Request>) {
 
 /// Send one request to the dashboard at `path` and wait for its reply.
 pub fn call(path: &Path, cmd: &str, args: Value) -> Result<Value> {
-    let mut s = UnixStream::connect(path).with_context(|| format!("connecting to metroctl at {}", path.display()))?;
+    let mut s = UnixStream::connect(path).with_context(|| format!("connecting to signalbox at {}", path.display()))?;
     s.set_read_timeout(Some(Duration::from_secs(40)))?;
     writeln!(s, "{}", json!({ "cmd": cmd, "args": args }))?;
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line)?;
     if line.is_empty() {
-        return Err(anyhow!("metroctl closed the connection"));
+        return Err(anyhow!("signalbox closed the connection"));
     }
     Ok(serde_json::from_str(&line)?)
 }
@@ -86,16 +86,16 @@ pub fn find_session(dir: &Path) -> Result<(PathBuf, crate::session::SessionFile)
     for d in dir.ancestors() {
         if let Some(s) = crate::session::read_session(d) {
             if !crate::session::pid_alive(s.pid) {
-                return Err(anyhow!("the metroctl session in {} isn't running (stale session.json)", d.display()));
+                return Err(anyhow!("the signalbox session in {} isn't running (stale session.json)", d.display()));
             }
-            let sock = s.socket.clone().ok_or_else(|| anyhow!("the metroctl session in {} has no control socket", d.display()))?;
+            let sock = s.socket.clone().ok_or_else(|| anyhow!("the signalbox session in {} has no control socket", d.display()))?;
             return Ok((PathBuf::from(sock), s));
         }
     }
-    Err(anyhow!("no running metroctl session here — start one with `metroctl` or `metroctl up`"))
+    Err(anyhow!("no running signalbox session here — start one with `signalbox` or `signalbox up`"))
 }
 
-/// `metroctl ctl <cmd> [json args]`: one request to this checkout's session.
+/// `signalbox ctl <cmd> [json args]`: one request to this checkout's session.
 pub fn ctl(cmd: &str, args: Option<&str>) -> Result<()> {
     let args: Value = match args {
         Some(a) => serde_json::from_str(a).context("args must be a JSON object")?,

@@ -11,13 +11,13 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-/// Optional CDP wire trace. Set METROCTL_CDP_DEBUG=/path/to/log to append every
+/// Optional CDP wire trace. Set SIGNALBOX_CDP_DEBUG=/path/to/log to append every
 /// frame sent/received (and anything `await_result` drops) for debugging the
 /// Hermes/fusebox handshake. Resolved once per process.
 static CDP_TRACE: OnceLock<Option<String>> = OnceLock::new();
 
 fn cdp_trace(tag: &str, msg: &str) {
-    let path = CDP_TRACE.get_or_init(|| std::env::var("METROCTL_CDP_DEBUG").ok());
+    let path = CDP_TRACE.get_or_init(|| crate::rnconfig::env("CDP_DEBUG"));
     if let Some(p) = path {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
@@ -167,7 +167,7 @@ impl RnClient {
         let sink = debug_sink.clone();
         let bundle_poll = bundle.clone();
         std::thread::spawn(move || poll_loop(port, evt, senders, sink, bundle_poll));
-        // Expose this metroctl's single Hermes debugger to editors over DAP.
+        // Expose this signalbox's single Hermes debugger to editors over DAP.
         let dap_error = match dap::bind() {
             Ok(listener) => {
                 let dap_senders = cmd_senders.clone();

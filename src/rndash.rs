@@ -1,4 +1,4 @@
-//! `metroctl` — the tiled React Native dashboard. One window: a Processes pane
+//! `signalbox` — the tiled React Native dashboard. One window: a Processes pane
 //! (Metro + install/run, each in a PTY), a Devices & Actions pane (launch
 //! sims/emulators, install & run, open links, app-presence), and the embedded
 //! `RnView` (JS logs / network / perf). Keys are pane-scoped — each pane owns its
@@ -72,7 +72,7 @@ struct DeviceRow {
     foreground: Option<bool>,
     detail: Option<String>,  // OS version, API level, connection…
     problem: Option<String>, // why it can't be used yet (unauthorized, Developer Mode off…)
-    pinned: bool,            // the device this session (`metroctl up`) builds onto
+    pinned: bool,            // the device this session (`signalbox up`) builds onto
 }
 
 impl DeviceRow {
@@ -114,7 +114,7 @@ pub struct DashApp {
     procs: Vec<PtyProcess>,
     proc_sel: usize,
     metro_idx: Option<usize>,
-    metro_external: bool, // metro_idx is a watcher tab for a Metro started outside metroctl
+    metro_external: bool, // metro_idx is a watcher tab for a Metro started outside signalbox
     client: RnClient,
     rnview: RnView,
     focus: Pane,
@@ -134,17 +134,17 @@ pub struct DashApp {
     help: Option<u16>, // `?` key-reference popup, with its scroll offset
     quit: bool,
     started: Instant, // the "debugger off" notice only shows for a while after start
-    pinned: Option<Pinned>,     // device this session builds onto (`metroctl up`)
-    setup: Option<SetupRun>,    // `metroctl up` steps still in progress
-    status: String,             // session status, mirrored to .metroctl/session.json
-    term: Arc<AtomicBool>,      // SIGTERM/SIGHUP received (e.g. `metroctl down`)
+    pinned: Option<Pinned>,     // device this session builds onto (`signalbox up`)
+    setup: Option<SetupRun>,    // `signalbox up` steps still in progress
+    status: String,             // session status, mirrored to .signalbox/session.json
+    term: Arc<AtomicBool>,      // SIGTERM/SIGHUP received (e.g. `signalbox down`)
     delete_sim_on_quit: bool,
     sim_builds: Vec<(usize, String, bool)>, // build tabs → (device, android?), to point the app at our port
     ctl_rx: Receiver<control::Request>,
     socket: Option<PathBuf>, // control socket, when it could be bound
 }
 
-/// What `metroctl up` asked for, applied once the dashboard opens.
+/// What `signalbox up` asked for, applied once the dashboard opens.
 pub struct Setup {
     pub pinned: Option<Pinned>,
     pub install: bool,
@@ -178,7 +178,7 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
     let root = app.root();
     let delete = app.delete_sim_on_quit.then(|| app.pinned.as_ref().map(|p| p.udid.clone())).flatten();
     // A kept simulator: stop its app from pointing at our (soon free) port.
-    // On SIGTERM `metroctl down` does this (or deletes the simulator).
+    // On SIGTERM `signalbox down` does this (or deletes the simulator).
     if let (None, false, Some(p)) = (&delete, app.term.load(Ordering::Relaxed), &app.pinned) {
         if p.android {
             session::android_release(&p.udid);
@@ -187,7 +187,7 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
         }
     }
     let socket = app.socket.clone();
-    // Stopped by a signal (window closed, killed, `metroctl down`) with a
+    // Stopped by a signal (window closed, killed, `signalbox down`) with a
     // simulator we created: leave the session files, so `down`, `gc` or the
     // next `up` can still find and delete that simulator.
     let orphan = app.term.load(Ordering::Relaxed) && app.pinned.as_ref().is_some_and(|p| p.created);
@@ -403,7 +403,7 @@ impl DashApp {
         }
     }
 
-    /// Kick off `metroctl up`: install deps and boot the pinned simulator (in
+    /// Kick off `signalbox up`: install deps and boot the pinned simulator (in
     /// parallel), then Metro, then the build — driven by `advance_setup`.
     fn begin_setup(&mut self, setup: &Setup) {
         if !setup.start {
@@ -726,7 +726,7 @@ impl DashApp {
         if self.metro_idx.is_some() || !metro_events::port_in_use(port) {
             return;
         }
-        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "metroctl".into());
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "signalbox".into());
         let cmd = format!("'{}' metro-events --port {port}", exe.replace('\'', "'\\''"));
         if let Some(i) = self.spawn_proc("Metro (external)", &cmd) {
             self.metro_idx = Some(i);
@@ -1164,7 +1164,7 @@ impl DashApp {
             self.advance_setup();
             self.finish_sim_builds();
             if self.term.load(Ordering::Relaxed) {
-                // `metroctl down` / window closed: quit; `down` handles the simulator.
+                // `signalbox down` / window closed: quit; `down` handles the simulator.
                 return Ok(());
             }
 
@@ -1661,7 +1661,7 @@ fn render_quit_popup(frame: &mut Frame, area: Rect, created_sim: Option<String>)
     if let Some(sim) = created_sim {
         let r = centered(area, 64, 6);
         frame.render_widget(Clear, r);
-        let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit metroctl? ");
+        let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit signalbox? ");
         let inner = block.inner(r);
         frame.render_widget(block, r);
         let lines = vec![
@@ -1683,7 +1683,7 @@ fn render_quit_popup(frame: &mut Frame, area: Rect, created_sim: Option<String>)
     }
     let r = centered(area, 50, 5);
     frame.render_widget(Clear, r); // wipe whatever's underneath
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit metroctl? ");
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit signalbox? ");
     let inner = block.inner(r);
     frame.render_widget(block, r);
     let lines = vec![
@@ -1854,7 +1854,7 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
             Style::default()
         };
         let mut spans = vec![Span::raw(" "), marker, Span::styled(d.label.clone(), name_style)];
-        // The highlighted device's id, for `--device` in metroctl, touchctl and simon.
+        // The highlighted device's id, for `--device` in signalbox, boop and simon.
         if focused && i == app.dev_sel && d.id != d.label {
             spans.push(Span::styled(format!("  {}", d.id), Style::default().fg(Color::DarkGray)));
         }

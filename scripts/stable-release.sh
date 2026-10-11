@@ -4,7 +4,7 @@
 # this commit is already released.
 set -euo pipefail
 
-REPO="hvalec427/metroctl"
+REPO="hvalec427/signalbox"
 
 LATEST=$(git tag -l 'v*' | { grep -v -e '-' || true; } | sort -V | tail -1 | sed 's/^v//')
 if [ -n "${LATEST:-}" ]; then
@@ -21,7 +21,7 @@ bash scripts/build-binaries.sh "${VERSION}"
 
 NOTES=$(mktemp)
 {
-  echo "metroctl ${VERSION}"
+  echo "signalbox ${VERSION}"
   echo
   git log ${LATEST:+v${LATEST}..}HEAD --no-merges --pretty=format:'- %s (%h)' 2>/dev/null || true
 } > "${NOTES}"
@@ -30,4 +30,4 @@ gh release create "${TAG}" \
   --target "$(git rev-parse HEAD)" \
   --title "${TAG}" \
   --notes-file "${NOTES}" \
-  metroctl-darwin-arm64 metroctl-darwin-x64
+  signalbox-darwin-arm64 signalbox-darwin-x64
