@@ -267,3 +267,14 @@ local check once per clone:
 ```sh
 git config core.hooksPath .githooks
 ```
+
+## Developing signalbox with Control Room
+
+signalbox's TUIs run under [controlroom](https://github.com/hvalec427/controlroom),
+so coding agents can test them: in this repo, `controlroom up` builds it and
+starts the log viewer (`signalbox logs`) with its config in
+`.controlroom/home/signalbox` (`SIGNALBOX_HOME`), apart from yours. For the
+dashboard, start it from a React Native checkout:
+`controlroom up -- <this repo>/target/debug/signalbox up --prebuilt` (it uses
+your real project registry and simulators there). With `$CONTROLROOM_LOG` set,
+the TUIs log keys and status changes to it (`controlroom logs`).

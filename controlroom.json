@@ -1,0 +1,5 @@
+{
+  "build": "cargo build --quiet",
+  "run": "target/debug/signalbox logs",
+  "env": { "SIGNALBOX_HOME": "$CONTROLROOM_HOME/signalbox" }
+}

@@ -3,6 +3,7 @@
 //! management. No subcommand opens the dashboard; `logs` is the standalone
 //! React Native log viewer; `init`/`config` manage the project registry.
 
+mod devlog;
 mod commands_rn;
 mod control;
 mod devinfo;

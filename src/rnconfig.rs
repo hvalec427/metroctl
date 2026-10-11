@@ -285,6 +285,10 @@ pub struct RnConfig {
 }
 
 pub fn rn_config_path() -> PathBuf {
+    // $SIGNALBOX_HOME: another config folder (e.g. a test instance's).
+    if let Some(dir) = std::env::var_os("SIGNALBOX_HOME").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir).join("config.json");
+    }
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let dir = home.join(".config/signalbox");
     // Projects registered before the rename (metroctl) move over once.

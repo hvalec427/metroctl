@@ -169,6 +169,7 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
     app.attach_external_metro();
     app.begin_setup(&setup);
     app.write_session();
+    crate::devlog::log("dashboard", format!("started (signalbox {}) in {}", env!("CARGO_PKG_VERSION"), app.root().display()));
     let mut terminal = ratatui::init();
     // Pastes arrive as one event (for the link form) instead of keystrokes.
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
@@ -657,6 +658,7 @@ impl DashApp {
 
     fn set_status(&mut self, status: &str) {
         if self.status != status {
+            crate::devlog::log("dashboard", format!("status {} → {status}", self.status));
             self.status = status.to_string();
             self.write_session();
         }
@@ -1191,6 +1193,7 @@ impl DashApp {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
+        crate::devlog::log("dashboard", format!("key {:?}{}", key.code, if key.modifiers.is_empty() { String::new() } else { format!(" {:?}", key.modifiers) }));
         let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
 
         // Quit confirmation popup swallows all input until answered.
