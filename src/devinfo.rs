@@ -10,7 +10,9 @@ use std::process::Command;
 
 fn output(cmd: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(cmd).args(args).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Marketing Android version for an API level ("34" → "14").
@@ -49,18 +51,30 @@ pub fn android_running(serial: &str, physical: bool) -> Option<String> {
     let adb = android::find_bin("adb");
     let out = output(&adb, &["-s", serial, "shell", "getprop ro.build.version.release; getprop ro.build.version.sdk; getprop ro.product.manufacturer"])?;
     let mut it = out.lines().map(str::trim);
-    let (release, api, maker) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+    let (release, api, maker) = (
+        it.next().unwrap_or(""),
+        it.next().unwrap_or(""),
+        it.next().unwrap_or(""),
+    );
     let mut parts = Vec::new();
     if physical && !maker.is_empty() {
         let mut c = maker.chars();
-        parts.push(c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default());
+        parts.push(
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default(),
+        );
     }
     if !api.is_empty() {
         parts.push(version_api((!release.is_empty()).then_some(release), api));
     }
     if physical {
         // Wireless debugging serials are `ip:port` or an mDNS `adb-…._adb-tls-connect…` name.
-        parts.push(if serial.contains(':') || serial.contains("_adb-tls-") { "Wi-Fi".into() } else { "USB".into() });
+        parts.push(if serial.contains(':') || serial.contains("_adb-tls-") {
+            "Wi-Fi".into()
+        } else {
+            "USB".into()
+        });
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
@@ -69,14 +83,29 @@ pub fn android_running(serial: &str, physical: bool) -> Option<String> {
 /// while it's shut down).
 pub fn avd(name: &str) -> Option<String> {
     let home = PathBuf::from(std::env::var("HOME").ok()?);
-    let root = std::env::var("ANDROID_AVD_HOME").map(PathBuf::from).unwrap_or_else(|_| home.join(".android/avd"));
+    let root = std::env::var("ANDROID_AVD_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".android/avd"));
     let ini = std::fs::read_to_string(root.join(format!("{name}.ini"))).ok()?;
-    let dir = ini.lines().find_map(|l| l.strip_prefix("path=")).map(PathBuf::from).unwrap_or_else(|| root.join(format!("{name}.avd")));
+    let dir = ini
+        .lines()
+        .find_map(|l| l.strip_prefix("path="))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(format!("{name}.avd")));
     let cfg = std::fs::read_to_string(dir.join("config.ini")).ok()?;
-    let get = |key: &str| cfg.lines().find_map(|l| l.split_once('=').filter(|(k, _)| k.trim() == key).map(|(_, v)| v.trim().to_string()));
+    let get = |key: &str| {
+        cfg.lines().find_map(|l| {
+            l.split_once('=')
+                .filter(|(k, _)| k.trim() == key)
+                .map(|(_, v)| v.trim().to_string())
+        })
+    };
     // image.sysdir.1 = system-images/android-36/google_apis_playstore/arm64-v8a/
     let sysdir = get("image.sysdir.1")?;
-    let api = sysdir.split('/').find_map(|s| s.strip_prefix("android-"))?.to_string();
+    let api = sysdir
+        .split('/')
+        .find_map(|s| s.strip_prefix("android-"))?
+        .to_string();
     let mut parts = vec![version_api(None, &api)];
     let tag = get("tag.id").unwrap_or_default();
     if tag.contains("playstore") {
@@ -118,8 +147,17 @@ pub struct IosDetail {
 /// (from `devicectl`; empty without Xcode).
 pub fn ios_physical() -> HashMap<String, IosDetail> {
     let tmp = std::env::temp_dir().join("signalbox-devicectl.json");
-    let ok = Command::new("xcrun").args(["devicectl", "list", "devices", "--json-output"]).arg(&tmp).output().map(|o| o.status.success()).unwrap_or(false);
-    let data: serde_json::Value = match ok.then(|| std::fs::read(&tmp).ok()).flatten().and_then(|r| serde_json::from_slice(&r).ok()) {
+    let ok = Command::new("xcrun")
+        .args(["devicectl", "list", "devices", "--json-output"])
+        .arg(&tmp)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let data: serde_json::Value = match ok
+        .then(|| std::fs::read(&tmp).ok())
+        .flatten()
+        .and_then(|r| serde_json::from_slice(&r).ok())
+    {
         Some(d) => d,
         None => return HashMap::new(),
     };
@@ -130,7 +168,11 @@ pub fn ios_physical() -> HashMap<String, IosDetail> {
             continue; // not connected
         }
         let hw = &d["hardwareProperties"];
-        let udid = hw["udid"].as_str().or_else(|| d["identifier"].as_str()).unwrap_or("").to_string();
+        let udid = hw["udid"]
+            .as_str()
+            .or_else(|| d["identifier"].as_str())
+            .unwrap_or("")
+            .to_string();
         let mut parts = Vec::new();
         if let Some(m) = hw["marketingName"].as_str() {
             parts.push(m.to_string());
@@ -149,7 +191,13 @@ pub fn ios_physical() -> HashMap<String, IosDetail> {
             None
         };
         parts.retain(|p| !p.is_empty());
-        map.insert(udid, IosDetail { text: parts.join(" · "), problem });
+        map.insert(
+            udid,
+            IosDetail {
+                text: parts.join(" · "),
+                problem,
+            },
+        );
     }
     map
 }

@@ -3,10 +3,10 @@
 //! management. No subcommand opens the dashboard; `logs` is the standalone
 //! React Native log viewer; `init`/`config` manage the project registry.
 
-mod devlog;
 mod commands_rn;
 mod control;
 mod devinfo;
+mod devlog;
 mod mcp;
 mod metro_events;
 mod proc;
@@ -152,7 +152,16 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         None => commands_rn::launch(session::UpOpts::default()),
-        Some(Command::Up { port, device, new_sim, sim_type, sim_runtime, sim_cleanup, install, prebuilt }) => {
+        Some(Command::Up {
+            port,
+            device,
+            new_sim,
+            sim_type,
+            sim_runtime,
+            sim_cleanup,
+            install,
+            prebuilt,
+        }) => {
             let port = match port.as_deref() {
                 None => None,
                 Some("auto") => Some(None),
@@ -165,10 +174,26 @@ fn main() {
                 },
             };
             let new_sim = new_sim.map(|n| Some(n).filter(|n| !n.is_empty()));
-            commands_rn::launch(session::UpOpts { port, device, new_sim, sim_type, sim_runtime, sim_cleanup: Some(sim_cleanup), install, prebuilt })
+            commands_rn::launch(session::UpOpts {
+                port,
+                device,
+                new_sim,
+                sim_type,
+                sim_runtime,
+                sim_cleanup: Some(sim_cleanup),
+                install,
+                prebuilt,
+            })
         }
         Some(Command::Down { keep_sim }) => commands_rn::down(keep_sim),
-        Some(Command::Sim { action: SimAction::New { name, sim_type, sim_runtime } }) => match session::create_simulator(&name, sim_runtime.as_deref(), sim_type.as_deref()) {
+        Some(Command::Sim {
+            action:
+                SimAction::New {
+                    name,
+                    sim_type,
+                    sim_runtime,
+                },
+        }) => match session::create_simulator(&name, sim_runtime.as_deref(), sim_type.as_deref()) {
             // stdout: just the udid, for scripts; the description goes to stderr.
             Ok((udid, desc)) => {
                 eprintln!("created {name}: {desc}");
@@ -194,10 +219,23 @@ fn main() {
         }
         Some(Command::Init) => commands_rn::init(),
         Some(Command::Config) => commands_rn::print_config_path(),
-        Some(Command::Logs { name, port, print_ws }) => logs(name, port, print_ws),
+        Some(Command::Logs {
+            name,
+            port,
+            print_ws,
+        }) => logs(name, port, print_ws),
         Some(Command::MetroEvents { port }) => metro_events::watch(port),
-        Some(Command::CheckUpdate { stable, nightly, dev }) => update::check_update(stable, nightly, dev),
-        Some(Command::Update { stable, nightly, dev, force }) => update::update(stable, nightly, dev, force),
+        Some(Command::CheckUpdate {
+            stable,
+            nightly,
+            dev,
+        }) => update::check_update(stable, nightly, dev),
+        Some(Command::Update {
+            stable,
+            nightly,
+            dev,
+            force,
+        }) => update::update(stable, nightly, dev, force),
     }
 }
 

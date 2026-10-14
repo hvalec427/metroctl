@@ -54,7 +54,10 @@ pub fn channel_of(version: &str) -> Channel {
 }
 
 fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder().user_agent(UA).build().expect("http client")
+    reqwest::blocking::Client::builder()
+        .user_agent(UA)
+        .build()
+        .expect("http client")
 }
 
 #[derive(Deserialize)]
@@ -81,7 +84,11 @@ pub fn latest_for_channel(channel: Channel) -> Result<Latest> {
     let c = client();
     match channel {
         Channel::Dev => {
-            let r = c.get(format!("https://api.github.com/repos/{REPO}/releases/tags/dev")).send()?;
+            let r = c
+                .get(format!(
+                    "https://api.github.com/repos/{REPO}/releases/tags/dev"
+                ))
+                .send()?;
             if !r.status().is_success() {
                 bail!("No dev build has been published yet.");
             }
@@ -90,26 +97,46 @@ pub fn latest_for_channel(channel: Channel) -> Result<Latest> {
             if version.is_empty() {
                 bail!("Could not read the dev build version.");
             }
-            Ok(Latest { version, tag: "dev".into() })
+            Ok(Latest {
+                version,
+                tag: "dev".into(),
+            })
         }
         Channel::Stable => {
-            let r = c.get(format!("https://api.github.com/repos/{REPO}/releases/latest")).send()?;
+            let r = c
+                .get(format!(
+                    "https://api.github.com/repos/{REPO}/releases/latest"
+                ))
+                .send()?;
             if !r.status().is_success() {
                 bail!("GitHub API returned {}", r.status());
             }
             let rel: Release = r.json()?;
-            Ok(Latest { version: strip_v(&rel.tag_name), tag: rel.tag_name })
+            Ok(Latest {
+                version: strip_v(&rel.tag_name),
+                tag: rel.tag_name,
+            })
         }
         Channel::Nightly => {
-            let r = c.get(format!("https://api.github.com/repos/{REPO}/releases?per_page=30")).send()?;
+            let r = c
+                .get(format!(
+                    "https://api.github.com/repos/{REPO}/releases?per_page=30"
+                ))
+                .send()?;
             if !r.status().is_success() {
                 bail!("GitHub API returned {}", r.status());
             }
             let mut releases: Vec<Release> = r.json()?;
             releases.retain(|r| r.prerelease && strip_v(&r.tag_name).contains("-nightly."));
             releases.sort_by(|a, b| compare_versions(&strip_v(&b.tag_name), &strip_v(&a.tag_name)));
-            let nightly = releases.into_iter().next().ok_or_else(|| anyhow::anyhow!("No nightly (prerelease) build found yet."))?;
-            Ok(Latest { version: strip_v(&nightly.tag_name), tag: nightly.tag_name })
+            let nightly = releases
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("No nightly (prerelease) build found yet."))?;
+            Ok(Latest {
+                version: strip_v(&nightly.tag_name),
+                tag: nightly.tag_name,
+            })
         }
     }
 }
@@ -131,22 +158,41 @@ pub fn changelog_since(channel: Channel, current: &str) -> Option<String> {
         return None;
     }
     let c = client();
-    let r = c.get(format!("https://api.github.com/repos/{REPO}/releases?per_page=100")).send().ok()?;
+    let r = c
+        .get(format!(
+            "https://api.github.com/repos/{REPO}/releases?per_page=100"
+        ))
+        .send()
+        .ok()?;
     if !r.status().is_success() {
         return None;
     }
     let releases: Vec<Release> = r.json().ok()?;
     let mut in_channel: Vec<Release> = releases
         .into_iter()
-        .filter(|r| if channel == Channel::Stable { !r.prerelease } else { r.prerelease && strip_v(&r.tag_name).contains("-nightly.") })
+        .filter(|r| {
+            if channel == Channel::Stable {
+                !r.prerelease
+            } else {
+                r.prerelease && strip_v(&r.tag_name).contains("-nightly.")
+            }
+        })
         .collect();
     in_channel.sort_by(|a, b| compare_versions(&strip_v(&b.tag_name), &strip_v(&a.tag_name)));
     if in_channel.is_empty() {
         return None;
     }
-    let known = current != "unknown" && current.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+    let known = current != "unknown"
+        && current
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false);
     let newer: Vec<&Release> = if known {
-        in_channel.iter().filter(|r| compare_versions(&strip_v(&r.tag_name), current) == Ordering::Greater).collect()
+        in_channel
+            .iter()
+            .filter(|r| compare_versions(&strip_v(&r.tag_name), current) == Ordering::Greater)
+            .collect()
     } else {
         in_channel.iter().take(1).collect()
     };
@@ -158,7 +204,12 @@ pub fn changelog_since(channel: Channel, current: &str) -> Option<String> {
         .iter()
         .take(MAX)
         .map(|r| {
-            let notes = r.body.as_deref().map(strip_install).filter(|s| !s.is_empty()).unwrap_or_else(|| "_(no notes)_".into());
+            let notes = r
+                .body
+                .as_deref()
+                .map(strip_install)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "_(no notes)_".into());
             format!("## {}\n\n{}", r.tag_name, notes)
         })
         .collect();
@@ -206,7 +257,10 @@ fn asset_name() -> &'static str {
 }
 
 pub fn download_binary(tag: &str) -> Result<PathBuf> {
-    let url = format!("https://github.com/{REPO}/releases/download/{tag}/{}", asset_name());
+    let url = format!(
+        "https://github.com/{REPO}/releases/download/{tag}/{}",
+        asset_name()
+    );
     let resp = client().get(&url).send()?;
     if !resp.status().is_success() {
         bail!("Download failed: {}", resp.status());
@@ -219,7 +273,11 @@ pub fn download_binary(tag: &str) -> Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     }
-    let _ = Command::new("xattr").arg("-d").arg("com.apple.quarantine").arg(&tmp).output();
+    let _ = Command::new("xattr")
+        .arg("-d")
+        .arg("com.apple.quarantine")
+        .arg(&tmp)
+        .output();
     Ok(tmp)
 }
 
@@ -231,7 +289,10 @@ pub fn install_target() -> PathBuf {
             return std::fs::canonicalize(&exe).unwrap_or(exe);
         }
     }
-    if let Ok(out) = Command::new("sh").args(["-c", "command -v signalbox"]).output() {
+    if let Ok(out) = Command::new("sh")
+        .args(["-c", "command -v signalbox"])
+        .output()
+    {
         let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !p.is_empty() {
             return std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(p));
@@ -254,7 +315,11 @@ pub fn needs_sudo(target: &std::path::Path) -> bool {
 }
 
 pub fn install_binary(tmp: &std::path::Path, target: &std::path::Path) -> Result<()> {
-    let cmd = if needs_sudo(target) { ("sudo", vec!["mv"]) } else { ("mv", vec![]) };
+    let cmd = if needs_sudo(target) {
+        ("sudo", vec!["mv"])
+    } else {
+        ("mv", vec![])
+    };
     let mut c = Command::new(cmd.0);
     c.args(cmd.1).arg(tmp).arg(target);
     if !c.status()?.success() {
@@ -296,21 +361,37 @@ pub fn update(stable: bool, nightly: bool, dev: bool, force: bool) {
 
     let cmp = compare_versions(&latest.version, &current);
     if cmp == Ordering::Equal && !force {
-        println!("Already on the latest {} version ({current}).", channel.as_str());
+        println!(
+            "Already on the latest {} version ({current}).",
+            channel.as_str()
+        );
         return;
     }
     if cmp == Ordering::Less && !switched && !force {
-        println!("The latest {} build ({}) is older than your installed {current} — not downgrading.", channel.as_str(), latest.version);
+        println!(
+            "The latest {} build ({}) is older than your installed {current} — not downgrading.",
+            channel.as_str(),
+            latest.version
+        );
         println!("`signalbox update` will pick it up once a newer {} build is published, or use --force.", channel.as_str());
         return;
     }
 
     if cmp == Ordering::Less {
-        println!("Installing {} ({}) — older than your current {current}{}.", latest.version, channel.as_str(), if switched { "" } else { ", forced" });
+        println!(
+            "Installing {} ({}) — older than your current {current}{}.",
+            latest.version,
+            channel.as_str(),
+            if switched { "" } else { ", forced" }
+        );
     } else if cmp == Ordering::Equal {
         println!("Reinstalling {} ({})...", latest.version, channel.as_str());
     } else {
-        println!("Updating {current} → {} ({})...", latest.version, channel.as_str());
+        println!(
+            "Updating {current} → {} ({})...",
+            latest.version,
+            channel.as_str()
+        );
         if let Some(notes) = changelog_since(channel, &current) {
             println!("\nWhat's new ({current} → {}):\n{notes}\n", latest.version);
         }
@@ -324,7 +405,11 @@ pub fn update(stable: bool, nightly: bool, dev: bool, force: bool) {
         }
     };
     let target = install_target();
-    let sudo_note = if needs_sudo(&target) { " (needs sudo — may prompt for your password)" } else { "" };
+    let sudo_note = if needs_sudo(&target) {
+        " (needs sudo — may prompt for your password)"
+    } else {
+        ""
+    };
     println!("Installing to {}{sudo_note}...", target.display());
     if let Err(e) = install_binary(&tmp, &target) {
         eprintln!("{e}");
@@ -363,17 +448,39 @@ pub fn check_update(stable: bool, nightly: bool, dev: bool) {
     match cmp {
         Ordering::Equal => println!("\nYou're up to date."),
         Ordering::Less => {
-            println!("\nThe latest {} build ({}) is older than your installed version.", channel.as_str(), latest.version);
+            println!(
+                "\nThe latest {} build ({}) is older than your installed version.",
+                channel.as_str(),
+                latest.version
+            );
             if stable || nightly || dev {
-                let flag = if dev { " --dev" } else if nightly { " --nightly" } else { " --stable" };
-                println!("Run `signalbox update{flag}` to switch to the {} channel (installs {}).", channel.as_str(), latest.version);
+                let flag = if dev {
+                    " --dev"
+                } else if nightly {
+                    " --nightly"
+                } else {
+                    " --stable"
+                };
+                println!(
+                    "Run `signalbox update{flag}` to switch to the {} channel (installs {}).",
+                    channel.as_str(),
+                    latest.version
+                );
             }
         }
         Ordering::Greater => {
             if let Some(notes) = changelog_since(channel, &current) {
                 println!("\nWhat's new ({current} → {}):\n{notes}", latest.version);
             }
-            let flag = if dev { " --dev" } else if nightly { " --nightly" } else if stable { " --stable" } else { "" };
+            let flag = if dev {
+                " --dev"
+            } else if nightly {
+                " --nightly"
+            } else if stable {
+                " --stable"
+            } else {
+                ""
+            };
             println!("\nRun `signalbox update{flag}` to install.");
         }
     }
@@ -386,11 +493,23 @@ mod tests {
 
     #[test]
     fn compares_versions() {
-        assert_eq!(compare_versions("1.3.0-dev.20261009120000", "1.2.0-dev.20261009130000"), Greater);
+        assert_eq!(
+            compare_versions("1.3.0-dev.20261009120000", "1.2.0-dev.20261009130000"),
+            Greater
+        );
         assert_eq!(compare_versions("1.2.0", "1.2.0-nightly.20261009"), Greater);
-        assert_eq!(compare_versions("2.16.0-nightly.20261009", "2.16.0-nightly.20261006193436"), Greater);
-        assert_eq!(compare_versions("2.16.0-nightly.20261006", "2.16.0-nightly.20261006193436"), Less);
-        assert_eq!(compare_versions("1.2.0-dev.20261009120000", "1.2.0-dev.20261009120000"), Equal);
+        assert_eq!(
+            compare_versions("2.16.0-nightly.20261009", "2.16.0-nightly.20261006193436"),
+            Greater
+        );
+        assert_eq!(
+            compare_versions("2.16.0-nightly.20261006", "2.16.0-nightly.20261006193436"),
+            Less
+        );
+        assert_eq!(
+            compare_versions("1.2.0-dev.20261009120000", "1.2.0-dev.20261009120000"),
+            Equal
+        );
     }
 
     #[test]

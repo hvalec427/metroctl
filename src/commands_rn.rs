@@ -2,9 +2,11 @@
 //! No subcommand launches the dashboard TUI; `init` registers the current
 //! directory; `config` prints the config path.
 
+use crate::rnconfig::{
+    current_project, load_rn_config, rn_config_path, save_rn_config, ProjectConfig, RnConfig,
+};
 use crate::rndash::Setup;
 use crate::session::{self, Pinned, SimCleanup, UpOpts};
-use crate::rnconfig::{current_project, load_rn_config, rn_config_path, save_rn_config, ProjectConfig, RnConfig};
 use inquire::Text;
 
 /// `signalbox` — launch the dashboard for the current project.
@@ -12,7 +14,9 @@ pub fn launch(opts: UpOpts) {
     let cfg = match load_rn_config() {
         Ok(Some(c)) => c,
         Ok(None) => {
-            eprintln!("No projects configured yet. Run `signalbox init` in your project directory.");
+            eprintln!(
+                "No projects configured yet. Run `signalbox init` in your project directory."
+            );
             std::process::exit(1);
         }
         Err(e) => {
@@ -54,20 +58,41 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
     }
     let cleanup = opts.sim_cleanup.unwrap_or(SimCleanup::Ask);
     let pinned = if let Some(name) = &opts.new_sim {
-        let name = name.clone().unwrap_or_else(|| session::default_sim_name(std::path::Path::new(&project.root)));
+        let name = name
+            .clone()
+            .unwrap_or_else(|| session::default_sim_name(std::path::Path::new(&project.root)));
         eprintln!("creating simulator {name}…");
-        let (udid, desc) = session::create_simulator(&name, opts.sim_runtime.as_deref(), opts.sim_type.as_deref())?;
+        let (udid, desc) = session::create_simulator(
+            &name,
+            opts.sim_runtime.as_deref(),
+            opts.sim_type.as_deref(),
+        )?;
         eprintln!("created {desc} ({udid})");
-        Some(Pinned { udid, created: true, simulator: true, android: false, cleanup, name: Some(name) })
+        Some(Pinned {
+            udid,
+            created: true,
+            simulator: true,
+            android: false,
+            cleanup,
+            name: Some(name),
+        })
     } else {
-        opts.device.as_deref().map(|id| session::pin_device(id, cleanup)).transpose()?
+        opts.device
+            .as_deref()
+            .map(|id| session::pin_device(id, cleanup))
+            .transpose()?
     };
     let up = opts.port.is_some() || pinned.is_some() || opts.install;
     // --prebuilt: the main checkout's last simulator build, when there is one.
     let prebuilt = match (&pinned, opts.prebuilt, project.ios_bundle_id()) {
         (Some(p), true, Some(bundle)) if p.simulator => {
-            let main = crate::rnconfig::git_worktree_roots(std::path::Path::new(&project.root)).map(|(m, _)| m);
-            let app = session::find_prebuilt_app(bundle, main.as_deref().or(Some(std::path::Path::new(&project.root))));
+            let main = crate::rnconfig::git_worktree_roots(std::path::Path::new(&project.root))
+                .map(|(m, _)| m);
+            let app = session::find_prebuilt_app(
+                bundle,
+                main.as_deref()
+                    .or(Some(std::path::Path::new(&project.root))),
+            );
             match &app {
                 Some(a) => eprintln!("using prebuilt {}", a.display()),
                 None => eprintln!("no prebuilt app for {bundle} in DerivedData; building instead"),
@@ -76,12 +101,21 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
         }
         _ => None,
     };
-    Ok(Setup { pinned, install: opts.install, start: up, prebuilt })
+    Ok(Setup {
+        pinned,
+        install: opts.install,
+        start: up,
+        prebuilt,
+    })
 }
 
 /// `signalbox down` — stop the session running in this checkout.
 pub fn down(keep_sim: bool) {
-    let root = load_rn_config().ok().flatten().and_then(|c| current_project(&c)).map(|p| std::path::PathBuf::from(p.root));
+    let root = load_rn_config()
+        .ok()
+        .flatten()
+        .and_then(|c| current_project(&c))
+        .map(|p| std::path::PathBuf::from(p.root));
     let root = root.or_else(|| std::env::current_dir().ok()).unwrap();
     if let Err(e) = session::down(&root, keep_sim) {
         eprintln!("{e:#}");
@@ -102,8 +136,15 @@ pub fn init() {
         eprintln!("Warning: no package.json here — this doesn't look like a JS project.");
     }
 
-    let default_name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("app").to_string();
-    let name = match Text::new("Project name:").with_default(&default_name).prompt() {
+    let default_name = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("app")
+        .to_string();
+    let name = match Text::new("Project name:")
+        .with_default(&default_name)
+        .prompt()
+    {
         Ok(n) => n,
         Err(_) => return,
     };
@@ -134,13 +175,20 @@ pub fn init() {
     println!("  metro   → {}  (:{})", p.metro_command(), p.metro_port());
     println!("  ios     → {}", p.ios_command());
     println!("  android → {}", p.android_command());
-    println!("\nEdit {} to customize commands, port, simulator/avd, or env.", rn_config_path().display());
+    println!(
+        "\nEdit {} to customize commands, port, simulator/avd, or env.",
+        rn_config_path().display()
+    );
 }
 
 /// `signalbox config` — print the config file path.
 pub fn print_config_path() {
     println!("{}", rn_config_path().display());
-    if load_rn_config().unwrap_or(None).map(|c: RnConfig| c.projects.is_empty()).unwrap_or(true) {
+    if load_rn_config()
+        .unwrap_or(None)
+        .map(|c: RnConfig| c.projects.is_empty())
+        .unwrap_or(true)
+    {
         eprintln!("(no projects configured yet — run `signalbox init`)");
     }
 }

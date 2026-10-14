@@ -30,7 +30,7 @@ pub struct PtyProcess {
     /// output arrives (vt100 shifts a non-zero scrollback offset by itself;
     /// `pin` covers the paused-at-bottom case it doesn't).
     pub follow: bool,
-    pin: usize, // scrollback length when last rendered while paused
+    pin: usize,                  // scrollback length when last rendered while paused
     text: Arc<Mutex<PlainText>>, // plain-text tail for `output` over the control socket
 }
 
@@ -89,11 +89,23 @@ impl PlainText {
 impl PtyProcess {
     /// Spawn `command` (run through `sh -c`) in a PTY sized `rows`×`cols`, with
     /// `cwd` as the working directory and `env` merged over the inherited env.
-    pub fn spawn(label: impl Into<String>, command: &str, cwd: &Path, env: &BTreeMap<String, String>, rows: u16, cols: u16) -> Result<PtyProcess> {
+    pub fn spawn(
+        label: impl Into<String>,
+        command: &str,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        rows: u16,
+        cols: u16,
+    ) -> Result<PtyProcess> {
         let rows = rows.max(1);
         let cols = cols.max(1);
         let pty = native_pty_system();
-        let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+        let pair = pty.openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
 
         let mut cmd = CommandBuilder::new("sh");
         cmd.arg("-c");
@@ -184,7 +196,12 @@ impl PtyProcess {
         }
         self.rows = rows;
         self.cols = cols;
-        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        let _ = self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
         if let Ok(mut p) = self.parser.lock() {
             p.set_size(rows, cols);
         }
@@ -192,7 +209,10 @@ impl PtyProcess {
 
     /// Current scrollback offset (0 = bottom).
     pub fn scroll_offset(&self) -> usize {
-        self.parser.lock().map(|p| p.screen().scrollback()).unwrap_or(0)
+        self.parser
+            .lock()
+            .map(|p| p.screen().scrollback())
+            .unwrap_or(0)
     }
 
     /// Scroll into history by `delta` lines (negative = toward the bottom).
@@ -307,7 +327,8 @@ mod tests {
     #[test]
     fn captures_child_output_into_the_screen() {
         let env = BTreeMap::new();
-        let p = PtyProcess::spawn("test", "printf 'hello pty'", Path::new("/"), &env, 24, 80).expect("spawn");
+        let p = PtyProcess::spawn("test", "printf 'hello pty'", Path::new("/"), &env, 24, 80)
+            .expect("spawn");
         // Poll the parsed screen until the output shows up (bounded).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -315,7 +336,10 @@ mod tests {
             if contents.contains("hello pty") {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "child output never reached the screen");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child output never reached the screen"
+            );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
@@ -323,10 +347,26 @@ mod tests {
     #[test]
     fn paused_view_stays_put_while_output_arrives() {
         let env = BTreeMap::new();
-        let mut p = PtyProcess::spawn("test", "seq 1 50; sleep 0.5; seq 51 100", Path::new("/"), &env, 10, 40).expect("spawn");
+        let mut p = PtyProcess::spawn(
+            "test",
+            "seq 1 50; sleep 0.5; seq 51 100",
+            Path::new("/"),
+            &env,
+            10,
+            40,
+        )
+        .expect("spawn");
         std::thread::sleep(std::time::Duration::from_millis(250));
         p.toggle_follow(); // pause at the bottom, showing up to line 50
-        let bottom_row = |p: &PtyProcess| p.parser().lock().unwrap().screen().rows(0, 40).nth(8).unwrap_or_default();
+        let bottom_row = |p: &PtyProcess| {
+            p.parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .rows(0, 40)
+                .nth(8)
+                .unwrap_or_default()
+        };
         p.sync_scroll();
         let before = bottom_row(&p);
         assert_eq!(before.trim(), "50");
@@ -351,7 +391,10 @@ mod tests {
             if contents.contains("ping") {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "input never echoed back");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "input never echoed back"
+            );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }

@@ -14,13 +14,15 @@ use crate::rnclient::{ConnCmd, RnClient};
 use crate::rnconfig::{PackageManager, ProjectConfig};
 use crate::rnview::RnView;
 use crate::session::{self, Pinned, SessionFile, SimCleanup};
-use simon::devices::{get_all_installed, get_all_running, InstalledDevice, Platform, RunningDevice};
-use simon::{android, ios};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use serde_json::{json, Value};
+use simon::devices::{
+    get_all_installed, get_all_running, InstalledDevice, Platform, RunningDevice,
+};
+use simon::{android, ios};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,17 +130,17 @@ pub struct DashApp {
     v_split: u16, // % height of the top row (processes/devices) vs the logs pane
     h_split: u16, // % width of the processes pane vs devices
     confirm_quit: bool,
-    link_picker: bool, // deep-link quick-picker overlay
+    link_picker: bool,                    // deep-link quick-picker overlay
     link_search: Option<(String, usize)>, // `/` in the picker: filter query and selected match
     link_form: Option<LinkForm>, // values for a picked link's placeholders, or a pasted URL
     link_values: HashMap<String, String>, // last value per placeholder name, prefilled next time
-    help: Option<u16>, // `?` key-reference popup, with its scroll offset
+    help: Option<u16>,           // `?` key-reference popup, with its scroll offset
     quit: bool,
     started: Instant, // the "debugger off" notice only shows for a while after start
-    pinned: Option<Pinned>,     // device this session builds onto (`signalbox up`)
-    setup: Option<SetupRun>,    // `signalbox up` steps still in progress
-    status: String,             // session status, mirrored to .signalbox/session.json
-    term: Arc<AtomicBool>,      // SIGTERM/SIGHUP received (e.g. `signalbox down`)
+    pinned: Option<Pinned>, // device this session builds onto (`signalbox up`)
+    setup: Option<SetupRun>, // `signalbox up` steps still in progress
+    status: String,   // session status, mirrored to .signalbox/session.json
+    term: Arc<AtomicBool>, // SIGTERM/SIGHUP received (e.g. `signalbox down`)
     delete_sim_on_quit: bool,
     sim_builds: Vec<(usize, String, bool)>, // build tabs → (device, android?), to point the app at our port
     ctl_rx: Receiver<control::Request>,
@@ -149,7 +151,7 @@ pub struct DashApp {
 pub struct Setup {
     pub pinned: Option<Pinned>,
     pub install: bool,
-    pub start: bool, // start Metro and build onto the pinned device
+    pub start: bool,               // start Metro and build onto the pinned device
     pub prebuilt: Option<PathBuf>, // install this .app instead of building
 }
 
@@ -170,7 +172,14 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
     app.attach_external_metro();
     app.begin_setup(&setup);
     app.write_session();
-    crate::devlog::log("dashboard", format!("started (signalbox {}) in {}", env!("CARGO_PKG_VERSION"), app.root().display()));
+    crate::devlog::log(
+        "dashboard",
+        format!(
+            "started (signalbox {}) in {}",
+            env!("CARGO_PKG_VERSION"),
+            app.root().display()
+        ),
+    );
     let mut terminal = ratatui::init();
     // Pastes arrive as one event (for the link form) instead of keystrokes.
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
@@ -178,7 +187,10 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     let root = app.root();
-    let delete = app.delete_sim_on_quit.then(|| app.pinned.as_ref().map(|p| p.udid.clone())).flatten();
+    let delete = app
+        .delete_sim_on_quit
+        .then(|| app.pinned.as_ref().map(|p| p.udid.clone()))
+        .flatten();
     // A kept simulator: stop its app from pointing at our (soon free) port.
     // On SIGTERM `signalbox down` does this (or deletes the simulator).
     if let (None, false, Some(p)) = (&delete, app.term.load(Ordering::Relaxed), &app.pinned) {
@@ -224,13 +236,18 @@ impl DashApp {
             let mut ios_udids: Vec<String> = Vec::new();
             loop {
                 let running_devices = get_all_running(None);
-                let udids: Vec<String> = running_devices.iter().filter_map(|d| match d {
-                    RunningDevice::IosPhysical { udid, .. } => Some(udid.clone()),
-                    _ => None,
-                }).collect();
+                let udids: Vec<String> = running_devices
+                    .iter()
+                    .filter_map(|d| match d {
+                        RunningDevice::IosPhysical { udid, .. } => Some(udid.clone()),
+                        _ => None,
+                    })
+                    .collect();
                 if udids.is_empty() {
                     ios_details.clear();
-                } else if udids != ios_udids || ios_checked.map_or(true, |t| t.elapsed() > Duration::from_secs(15)) {
+                } else if udids != ios_udids
+                    || ios_checked.map_or(true, |t| t.elapsed() > Duration::from_secs(15))
+                {
                     ios_details = devinfo::ios_physical();
                     ios_checked = Some(Instant::now());
                 }
@@ -238,7 +255,9 @@ impl DashApp {
                 // Resolve a running emulator's adb serial from its AVD name.
                 let android_serial = |avd: &str| {
                     running_devices.iter().find_map(|d| match d {
-                        RunningDevice::AndroidEmulator { name, serial } if name == avd => Some(serial.clone()),
+                        RunningDevice::AndroidEmulator { name, serial } if name == avd => {
+                            Some(serial.clone())
+                        }
                         _ => None,
                     })
                 };
@@ -255,7 +274,9 @@ impl DashApp {
                 let mut rows: Vec<DeviceRow> = Vec::new();
                 for d in get_all_installed(None) {
                     let label = match &d {
-                        InstalledDevice::IosSim { name, runtime, .. } => format!("{name}  {runtime}"),
+                        InstalledDevice::IosSim { name, runtime, .. } => {
+                            format!("{name}  {runtime}")
+                        }
                         InstalledDevice::AndroidAvd { name, .. } => name.clone(),
                     };
                     let running = d.running();
@@ -279,7 +300,10 @@ impl DashApp {
                                 Some(s) => android_state(s),
                                 None => (None, None),
                             };
-                            let detail = serial.as_deref().and_then(|s| devinfo::android_running(s, false)).or_else(|| devinfo::avd(name));
+                            let detail = serial
+                                .as_deref()
+                                .and_then(|s| devinfo::android_running(s, false))
+                                .or_else(|| devinfo::avd(name));
                             DeviceRow {
                                 label,
                                 id: name.clone(),
@@ -300,7 +324,11 @@ impl DashApp {
                 // … plus any connected physical devices (already running, not bootable).
                 for d in &running_devices {
                     match d {
-                        RunningDevice::IosPhysical { name, udid, os_version } => {
+                        RunningDevice::IosPhysical {
+                            name,
+                            udid,
+                            os_version,
+                        } => {
                             let extra = ios_details.get(udid);
                             rows.push(DeviceRow {
                                 label: format!("{name}  iOS {os_version}"),
@@ -352,7 +380,8 @@ impl DashApp {
                     });
                 }
                 for r in &mut rows {
-                    r.pinned = pinned_udid.is_some() && (r.ios_udid() == pinned_udid || r.android_serial() == pinned_udid);
+                    r.pinned = pinned_udid.is_some()
+                        && (r.ios_udid() == pinned_udid || r.android_serial() == pinned_udid);
                 }
                 // Group as the pane shows them: this session's device, iOS sims,
                 // iPhones, Android emulators, phones.
@@ -412,7 +441,11 @@ impl DashApp {
         if !setup.start {
             return;
         }
-        let install = if setup.install { self.spawn_proc("Install", &self.project.install_command()) } else { None };
+        let install = if setup.install {
+            self.spawn_proc("Install", &self.project.install_command())
+        } else {
+            None
+        };
         let boot = match &self.pinned {
             Some(p) if p.simulator && session::sim_state(&p.udid).as_deref() != Some("Booted") => {
                 let cmd = session::boot_command(&p.udid);
@@ -423,7 +456,13 @@ impl DashApp {
         if setup.install && install.is_none() {
             return self.set_status("install_failed");
         }
-        self.setup = Some(SetupRun { install, boot, build: None, metro_started: false, prebuilt: setup.prebuilt.clone() });
+        self.setup = Some(SetupRun {
+            install,
+            boot,
+            build: None,
+            metro_started: false,
+            prebuilt: setup.prebuilt.clone(),
+        });
         self.advance_setup();
     }
 
@@ -436,7 +475,11 @@ impl DashApp {
             return Some(code == 0);
         }
         let tail = p.tail_text(40);
-        let launched = tail.iter().any(|l| l.starts_with("info Launching") || l.contains("Starting: Intent") || l.starts_with("info Starting the app"));
+        let launched = tail.iter().any(|l| {
+            l.starts_with("info Launching")
+                || l.contains("Starting: Intent")
+                || l.starts_with("info Starting the app")
+        });
         launched.then_some(true)
     }
 
@@ -463,13 +506,23 @@ impl DashApp {
             app.set_flash(msg.to_string());
         };
         if install == Some(false) {
-            return fail(self, "install_failed", "install failed — see the Install tab");
+            return fail(
+                self,
+                "install_failed",
+                "install failed — see the Install tab",
+            );
         }
         if boot == Some(false) {
-            return fail(self, "boot_failed", "simulator failed to boot — see the Simulator tab");
+            return fail(
+                self,
+                "boot_failed",
+                "simulator failed to boot — see the Simulator tab",
+            );
         }
         if install == Some(true) && !metro_started {
-            let ours = self.metro_idx.is_some_and(|i| !self.metro_external && self.procs.get(i).is_some_and(|p| p.is_alive()));
+            let ours = self.metro_idx.is_some_and(|i| {
+                !self.metro_external && self.procs.get(i).is_some_and(|p| p.is_alive())
+            });
             if !ours {
                 self.start_metro();
             }
@@ -497,7 +550,12 @@ impl DashApp {
             let prebuilt = self.setup.as_ref().and_then(|s| s.prebuilt.clone());
             match (prebuilt, self.project.ios_bundle_id().map(String::from)) {
                 (Some(app), Some(bundle)) if !android => {
-                    let cmd = session::install_prebuilt_command(&udid, &app, &bundle, self.project.metro_port());
+                    let cmd = session::install_prebuilt_command(
+                        &udid,
+                        &app,
+                        &bundle,
+                        self.project.metro_port(),
+                    );
                     if let Some(i) = self.spawn_proc("Install app", &cmd) {
                         self.proc_sel = i;
                     }
@@ -527,7 +585,15 @@ impl DashApp {
         // Default to this session's own device: another app can be connected to
         // the same Metro (e.g. a simulator still pointing at this port).
         let pinned_name = self.pinned.as_ref().and_then(|p| p.name.clone());
-        let s = |k: &str| a[k].as_str().filter(|v| !v.is_empty()).or(if k == "device" { pinned_name.as_deref() } else { None });
+        let s = |k: &str| {
+            a[k].as_str()
+                .filter(|v| !v.is_empty())
+                .or(if k == "device" {
+                    pinned_name.as_deref()
+                } else {
+                    None
+                })
+        };
         let since = a["since"].as_u64().unwrap_or(0);
         let limit = a["limit"].as_u64().map_or(50, |n| n as usize);
         let proc_json = |p: &PtyProcess| json!({ "label": p.label, "running": p.is_alive(), "exit_code": p.exit_code() });
@@ -546,8 +612,16 @@ impl DashApp {
                     "processes": self.procs.iter().map(proc_json).collect::<Vec<_>>(),
                 })
             }
-            "logs" => self.rnview.logs_json(s("device"), s("level"), s("filter"), since, limit),
-            "network" => self.rnview.net_json(s("device"), a["failed_only"].as_bool().unwrap_or(false), s("filter"), since, limit),
+            "logs" => self
+                .rnview
+                .logs_json(s("device"), s("level"), s("filter"), since, limit),
+            "network" => self.rnview.net_json(
+                s("device"),
+                a["failed_only"].as_bool().unwrap_or(false),
+                s("filter"),
+                since,
+                limit,
+            ),
             "request" => match s("id").and_then(|id| self.rnview.request_text(s("device"), id)) {
                 Some(t) => json!({ "text": t }),
                 None => json!({ "error": "no request with that id (see network)" }),
@@ -569,12 +643,20 @@ impl DashApp {
             "output" => {
                 let want = s("process").map(str::to_lowercase);
                 let p = match &want {
-                    Some(w) => self.procs.iter().rev().find(|p| p.label.to_lowercase().contains(w)),
+                    Some(w) => self
+                        .procs
+                        .iter()
+                        .rev()
+                        .find(|p| p.label.to_lowercase().contains(w)),
                     None => self.procs.last(),
                 };
                 match p {
-                    Some(p) => json!({ "label": p.label, "running": p.is_alive(), "exit_code": p.exit_code(), "lines": p.tail_text(a["lines"].as_u64().map_or(80, |n| n as usize)) }),
-                    None => json!({ "error": "no such process", "processes": self.procs.iter().map(|p| p.label.clone()).collect::<Vec<_>>() }),
+                    Some(p) => {
+                        json!({ "label": p.label, "running": p.is_alive(), "exit_code": p.exit_code(), "lines": p.tail_text(a["lines"].as_u64().map_or(80, |n| n as usize)) })
+                    }
+                    None => {
+                        json!({ "error": "no such process", "processes": self.procs.iter().map(|p| p.label.clone()).collect::<Vec<_>>() })
+                    }
                 }
             }
             "reload" => {
@@ -593,27 +675,49 @@ impl DashApp {
                 json!({ "ok": true, "port": self.project.metro_port() })
             }
             "rebuild" => {
-                let Some(udid) = a["device"].as_str().filter(|d| !d.is_empty()).map(String::from).or_else(|| self.pinned.as_ref().map(|p| p.udid.clone())) else {
+                let Some(udid) = a["device"]
+                    .as_str()
+                    .filter(|d| !d.is_empty())
+                    .map(String::from)
+                    .or_else(|| self.pinned.as_ref().map(|p| p.udid.clone()))
+                else {
                     return json!({ "error": "no device: this session isn't pinned to one, pass device (udid)" });
                 };
                 let before = self.procs.len();
-                let android = self.pinned.as_ref().is_some_and(|p| p.android && p.udid == udid) || session::adb_serials().contains(&udid);
+                let android = self
+                    .pinned
+                    .as_ref()
+                    .is_some_and(|p| p.android && p.udid == udid)
+                    || session::adb_serials().contains(&udid);
                 self.run_platform(android, Some(udid));
                 if self.procs.len() == before {
                     return json!({ "error": self.flash.as_ref().map(|f| f.0.clone()) });
                 }
                 // Track it like the setup build, so the session status follows it.
-                self.setup = Some(SetupRun { install: None, boot: None, build: Some(before), metro_started: true, prebuilt: None });
+                self.setup = Some(SetupRun {
+                    install: None,
+                    boot: None,
+                    build: Some(before),
+                    metro_started: true,
+                    prebuilt: None,
+                });
                 self.set_status("building");
                 json!({ "ok": true, "process": self.procs[before].label })
             }
-            _ => json!({ "error": format!("unknown command {cmd:?}"), "commands": ["deeplinks", "status", "logs", "errors", "network", "request", "output", "reload", "rebuild", "restart_metro"] }),
+            _ => {
+                json!({ "error": format!("unknown command {cmd:?}"), "commands": ["deeplinks", "status", "logs", "errors", "network", "request", "output", "reload", "rebuild", "restart_metro"] })
+            }
         }
     }
 
     fn is_simulator(&self, udid: &str) -> bool {
-        self.devices.iter().any(|d| matches!(&d.boot, Some(BootTarget::IosSim(u)) if u == udid))
-            || self.pinned.as_ref().is_some_and(|p| p.simulator && p.udid == udid)
+        self.devices
+            .iter()
+            .any(|d| matches!(&d.boot, Some(BootTarget::IosSim(u)) if u == udid))
+            || self
+                .pinned
+                .as_ref()
+                .is_some_and(|p| p.simulator && p.udid == udid)
     }
 
     /// Once an iOS simulator build succeeds, make the app load from our Metro
@@ -629,11 +733,15 @@ impl DashApp {
         if done.is_empty() {
             return;
         }
-        self.sim_builds.retain(|(i, _, _)| !done.iter().any(|d| d.0 == *i));
+        self.sim_builds
+            .retain(|(i, _, _)| !done.iter().any(|d| d.0 == *i));
         let port = self.project.metro_port();
         for (_, dev, android, _) in done.into_iter().filter(|d| d.3) {
             if android {
-                let (tx, pkg) = (self.tx.clone(), self.project.android_bundle_id().map(String::from));
+                let (tx, pkg) = (
+                    self.tx.clone(),
+                    self.project.android_bundle_id().map(String::from),
+                );
                 std::thread::spawn(move || {
                     let msg = match session::android_point_app_at_port(&dev, pkg.as_deref(), port) {
                         Ok(()) => format!("app on {dev} mapped to Metro :{port}"),
@@ -677,7 +785,16 @@ impl DashApp {
                 created_sim: self.pinned.as_ref().is_some_and(|p| p.created),
                 status: self.status.clone(),
                 bundle: self.project.ios_bundle_id().map(String::from),
-                platform: self.pinned.as_ref().map(|p| if p.android { "android" } else if p.simulator { "ios_simulator" } else { "ios_device" }.to_string()),
+                platform: self.pinned.as_ref().map(|p| {
+                    if p.android {
+                        "android"
+                    } else if p.simulator {
+                        "ios_simulator"
+                    } else {
+                        "ios_device"
+                    }
+                    .to_string()
+                }),
                 socket: self.socket.as_ref().map(|p| p.display().to_string()),
             },
         );
@@ -685,11 +802,17 @@ impl DashApp {
 
     /// The created simulator to offer deleting on quit (cleanup = ask).
     fn ask_delete_sim(&self) -> bool {
-        self.pinned.as_ref().is_some_and(|p| p.created && p.cleanup == SimCleanup::Ask)
+        self.pinned
+            .as_ref()
+            .is_some_and(|p| p.created && p.cleanup == SimCleanup::Ask)
     }
 
     fn request_quit(&mut self, delete_sim: bool) {
-        self.delete_sim_on_quit = delete_sim || self.pinned.as_ref().is_some_and(|p| p.created && p.cleanup == SimCleanup::Delete);
+        self.delete_sim_on_quit = delete_sim
+            || self
+                .pinned
+                .as_ref()
+                .is_some_and(|p| p.created && p.cleanup == SimCleanup::Delete);
         self.quit = true;
     }
 
@@ -702,14 +825,21 @@ impl DashApp {
     }
 
     fn pty_size(&self) -> (u16, u16) {
-        self.proc_area.map(|r| (r.height.max(1), r.width.max(1))).unwrap_or((24, 80))
+        self.proc_area
+            .map(|r| (r.height.max(1), r.width.max(1)))
+            .unwrap_or((24, 80))
     }
 
     fn spawn_proc(&mut self, label: &str, command: &str) -> Option<usize> {
         self.spawn_proc_env(label, command, self.project.command_env())
     }
 
-    fn spawn_proc_env(&mut self, label: &str, command: &str, env: BTreeMap<String, String>) -> Option<usize> {
+    fn spawn_proc_env(
+        &mut self,
+        label: &str,
+        command: &str,
+        env: BTreeMap<String, String>,
+    ) -> Option<usize> {
         let (rows, cols) = self.pty_size();
         match PtyProcess::spawn(label, command, &self.root(), &env, rows, cols) {
             Ok(p) => {
@@ -730,8 +860,13 @@ impl DashApp {
         if self.metro_idx.is_some() || !metro_events::port_in_use(port) {
             return;
         }
-        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "signalbox".into());
-        let cmd = format!("'{}' metro-events --port {port}", exe.replace('\'', "'\\''"));
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "signalbox".into());
+        let cmd = format!(
+            "'{}' metro-events --port {port}",
+            exe.replace('\'', "'\\''")
+        );
         if let Some(i) = self.spawn_proc("Metro (external)", &cmd) {
             self.metro_idx = Some(i);
             self.metro_external = true;
@@ -760,12 +895,23 @@ impl DashApp {
                 old.kill();
             }
             let (rows, cols) = self.pty_size();
-            match PtyProcess::spawn("Metro", &cmd, &self.root(), &self.project.command_env(), rows, cols) {
+            match PtyProcess::spawn(
+                "Metro",
+                &cmd,
+                &self.root(),
+                &self.project.command_env(),
+                rows,
+                cols,
+            ) {
                 Ok(p) => {
                     self.procs[i] = p;
                     self.proc_sel = i;
                     let took_over = std::mem::take(&mut self.metro_external);
-                    self.set_flash(if took_over { "took over external Metro" } else { "restarted Metro" });
+                    self.set_flash(if took_over {
+                        "took over external Metro"
+                    } else {
+                        "restarted Metro"
+                    });
                 }
                 Err(e) => self.set_flash(format!("failed to restart Metro: {e}")),
             }
@@ -828,10 +974,20 @@ impl DashApp {
         if cmd.contains(placeholder) {
             cmd = cmd.replace(placeholder, id.as_deref().unwrap_or(""));
         } else if let Some(ref id) = id {
-            let flag = if android { format!("--deviceId {id}") } else { format!("--udid {id}") };
-            let already = ["--udid", "--device", "--simulator", "--deviceId"].iter().any(|f| cmd.contains(f));
+            let flag = if android {
+                format!("--deviceId {id}")
+            } else {
+                format!("--udid {id}")
+            };
+            let already = ["--udid", "--device", "--simulator", "--deviceId"]
+                .iter()
+                .any(|f| cmd.contains(f));
             if !already {
-                let sep = if self.project.package_manager() == PackageManager::Npm { " -- " } else { " " };
+                let sep = if self.project.package_manager() == PackageManager::Npm {
+                    " -- "
+                } else {
+                    " "
+                };
                 cmd = format!("{cmd}{sep}{flag}");
             }
         }
@@ -872,12 +1028,18 @@ impl DashApp {
                 // run-android fall back to "first available" — the wrong device.
                 // Boot now; build on the next b once it shows ● running.
                 let what = if android { "emulator" } else { "simulator" };
-                self.set_flash(format!("{what} starting — press b again once it shows ● running"));
+                self.set_flash(format!(
+                    "{what} starting — press b again once it shows ● running"
+                ));
                 return;
             }
         }
         // Target this exact device: iOS by udid, Android by adb serial.
-        let id = if android { dev.android_serial() } else { dev.ios_udid() };
+        let id = if android {
+            dev.android_serial()
+        } else {
+            dev.ios_udid()
+        };
         self.run_platform(android, id);
     }
 
@@ -1030,7 +1192,11 @@ impl DashApp {
             self.project.ios_bundle_id().is_some()
         };
         if !has_bundle {
-            let which = if dev.platform == Platform::Android { "android" } else { "ios" };
+            let which = if dev.platform == Platform::Android {
+                "android"
+            } else {
+                "ios"
+            };
             self.set_flash(format!("set {which}.bundleId in rn.json to launch the app"));
             return;
         }
@@ -1045,8 +1211,21 @@ impl DashApp {
         };
         let names = crate::rnconfig::link_placeholders(link.url());
         if !names.is_empty() {
-            let values = names.into_iter().map(|n| (n.clone(), self.link_values.get(&n).cloned().unwrap_or_default())).collect();
-            self.link_form = Some(LinkForm { title: link.label().to_string(), template: link.url().to_string(), values, field: 0 });
+            let values = names
+                .into_iter()
+                .map(|n| {
+                    (
+                        n.clone(),
+                        self.link_values.get(&n).cloned().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            self.link_form = Some(LinkForm {
+                title: link.label().to_string(),
+                template: link.url().to_string(),
+                values,
+                field: 0,
+            });
             return;
         }
         self.open_url(link.url().to_string());
@@ -1080,16 +1259,31 @@ impl DashApp {
         let tx = self.tx.clone();
         let ios_bundle = self.project.ios_bundle_id().map(String::from);
         let android_pkg = self.project.android_bundle_id().map(String::from);
-        let verb = if url.is_some() { "opening" } else { "launching" };
+        let verb = if url.is_some() {
+            "opening"
+        } else {
+            "launching"
+        };
         self.set_flash(format!("{verb} on {label}…"));
         std::thread::spawn(move || {
             let res = match (&url, target) {
                 (Some(u), OpenTarget::IosSim(udid)) => ios::open_url_on_simulator(&udid, u),
-                (Some(u), OpenTarget::IosPhysical(udid)) => ios::open_url_on_physical_ios(&udid, u, ios_bundle.as_deref(), false),
-                (Some(u), OpenTarget::AndroidSerial(serial)) => android::open_url_with_package(&serial, u, android_pkg.as_deref()),
-                (None, OpenTarget::IosSim(udid)) => ios::launch_app_on_simulator(&udid, ios_bundle.as_deref().unwrap_or_default()),
-                (None, OpenTarget::IosPhysical(udid)) => ios::launch_app_on_physical_ios(&udid, ios_bundle.as_deref().unwrap_or_default()),
-                (None, OpenTarget::AndroidSerial(serial)) => android::launch_app(&serial, android_pkg.as_deref().unwrap_or_default()),
+                (Some(u), OpenTarget::IosPhysical(udid)) => {
+                    ios::open_url_on_physical_ios(&udid, u, ios_bundle.as_deref(), false)
+                }
+                (Some(u), OpenTarget::AndroidSerial(serial)) => {
+                    android::open_url_with_package(&serial, u, android_pkg.as_deref())
+                }
+                (None, OpenTarget::IosSim(udid)) => {
+                    ios::launch_app_on_simulator(&udid, ios_bundle.as_deref().unwrap_or_default())
+                }
+                (None, OpenTarget::IosPhysical(udid)) => ios::launch_app_on_physical_ios(
+                    &udid,
+                    ios_bundle.as_deref().unwrap_or_default(),
+                ),
+                (None, OpenTarget::AndroidSerial(serial)) => {
+                    android::launch_app(&serial, android_pkg.as_deref().unwrap_or_default())
+                }
             };
             let msg = match res {
                 Ok(()) => format!("done on {label}"),
@@ -1113,7 +1307,9 @@ impl DashApp {
         }
         // A Metro we don't own: send the command through its events socket.
         let command = if byte == b'r' { "reload" } else { "devMenu" };
-        if matches!(byte, b'r' | b'd') && metro_events::send_command(self.project.metro_port(), command) {
+        if matches!(byte, b'r' | b'd')
+            && metro_events::send_command(self.project.metro_port(), command)
+        {
             self.set_flash(format!("metro: {what}"));
             return;
         }
@@ -1195,14 +1391,28 @@ impl DashApp {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
-        crate::devlog::log("dashboard", format!("key {:?}{}", key.code, if key.modifiers.is_empty() { String::new() } else { format!(" {:?}", key.modifiers) }));
-        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        crate::devlog::log(
+            "dashboard",
+            format!(
+                "key {:?}{}",
+                key.code,
+                if key.modifiers.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {:?}", key.modifiers)
+                }
+            ),
+        );
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
 
         // Quit confirmation popup swallows all input until answered.
         if self.confirm_quit {
             match key.code {
                 KeyCode::Char('d') if self.ask_delete_sim() => self.request_quit(true),
-                KeyCode::Char('y') | KeyCode::Char('k') | KeyCode::Enter => self.request_quit(false),
+                KeyCode::Char('y') | KeyCode::Char('k') | KeyCode::Enter => {
+                    self.request_quit(false)
+                }
                 _ if ctrl_c => self.request_quit(false), // Ctrl-C again = force quit
                 KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => self.confirm_quit = false,
                 _ => {}
@@ -1214,7 +1424,9 @@ impl DashApp {
         // Key reference popup: scrolls like any list; ?/Esc/q close it.
         if let Some(top) = self.help.as_mut() {
             match key.code {
-                KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => self.help = None,
+                KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                    self.help = None
+                }
                 KeyCode::Char('j') | KeyCode::Down => *top = top.saturating_add(1),
                 KeyCode::Char('k') | KeyCode::Up => *top = top.saturating_sub(1),
                 KeyCode::Char('g') => *top = 0,
@@ -1230,11 +1442,15 @@ impl DashApp {
                 KeyCode::Esc => self.link_form = None,
                 _ if ctrl_c => self.link_form = None,
                 KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % form.values.len(),
-                KeyCode::BackTab | KeyCode::Up => form.field = (form.field + form.values.len() - 1) % form.values.len(),
+                KeyCode::BackTab | KeyCode::Up => {
+                    form.field = (form.field + form.values.len() - 1) % form.values.len()
+                }
                 KeyCode::Backspace => {
                     form.values[form.field].1.pop();
                 }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => form.values[form.field].1.clear(),
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    form.values[form.field].1.clear()
+                }
                 KeyCode::Enter if form.field + 1 < form.values.len() => form.field += 1,
                 KeyCode::Enter => {
                     let form = self.link_form.take().unwrap();
@@ -1260,12 +1476,17 @@ impl DashApp {
         }
 
         if self.link_picker && self.link_search.is_some() {
-            let matches = link_matches(&self.project.deeplinks, &self.link_search.as_ref().unwrap().0);
+            let matches = link_matches(
+                &self.project.deeplinks,
+                &self.link_search.as_ref().unwrap().0,
+            );
             let (query, sel) = self.link_search.as_mut().unwrap();
             match key.code {
                 KeyCode::Esc => self.link_search = None,
                 _ if ctrl_c => self.link_search = None,
-                KeyCode::Down | KeyCode::Tab => *sel = (*sel + 1).min(matches.len().saturating_sub(1)),
+                KeyCode::Down | KeyCode::Tab => {
+                    *sel = (*sel + 1).min(matches.len().saturating_sub(1))
+                }
                 KeyCode::Up | KeyCode::BackTab => *sel = sel.saturating_sub(1),
                 KeyCode::Backspace if query.is_empty() => self.link_search = None,
                 KeyCode::Backspace => {
@@ -1300,7 +1521,12 @@ impl DashApp {
             } else if key.code == KeyCode::Char(':') {
                 // Any URL, e.g. a magic login link pasted from an email.
                 self.link_picker = false;
-                self.link_form = Some(LinkForm { title: "Open a URL".into(), template: String::new(), values: vec![("url".into(), String::new())], field: 0 });
+                self.link_form = Some(LinkForm {
+                    title: "Open a URL".into(),
+                    template: String::new(),
+                    values: vec![("url".into(), String::new())],
+                    field: 0,
+                });
             } else if let KeyCode::Char(c) = key.code {
                 if let Some(i) = picker_index(c) {
                     if i < self.project.deeplinks.len() {
@@ -1340,9 +1566,13 @@ impl DashApp {
         if !logs_capturing {
             match key.code {
                 // Ctrl+arrows resize the panes.
-                KeyCode::Left if ctrl => return self.h_split = self.h_split.saturating_sub(5).max(20),
+                KeyCode::Left if ctrl => {
+                    return self.h_split = self.h_split.saturating_sub(5).max(20)
+                }
                 KeyCode::Right if ctrl => return self.h_split = (self.h_split + 5).min(80),
-                KeyCode::Up if ctrl => return self.v_split = self.v_split.saturating_sub(5).max(20),
+                KeyCode::Up if ctrl => {
+                    return self.v_split = self.v_split.saturating_sub(5).max(20)
+                }
                 KeyCode::Down if ctrl => return self.v_split = (self.v_split + 5).min(80),
                 KeyCode::Tab => return self.cycle_focus(false),
                 KeyCode::BackTab => return self.cycle_focus(true),
@@ -1388,7 +1618,12 @@ impl DashApp {
                 self.set_flash("external Metro takes no input here — m to take over");
             }
             KeyCode::Enter => {
-                if self.procs.get(self.proc_sel).map(|p| p.is_alive()).unwrap_or(false) {
+                if self
+                    .procs
+                    .get(self.proc_sel)
+                    .map(|p| p.is_alive())
+                    .unwrap_or(false)
+                {
                     self.input_mode = true;
                 } else {
                     self.set_flash("no running process in this tab");
@@ -1425,7 +1660,12 @@ impl DashApp {
             KeyCode::Char('s') => self.stop_selected_device(),
             KeyCode::Char('o') => self.open_selected(),
             KeyCode::Char('l') => {
-                if self.devices.get(self.dev_sel).and_then(|d| d.open.as_ref()).is_none() {
+                if self
+                    .devices
+                    .get(self.dev_sel)
+                    .and_then(|d| d.open.as_ref())
+                    .is_none()
+                {
                     self.set_flash("start the device first (⏎)");
                 } else {
                     self.link_picker = true;
@@ -1455,7 +1695,9 @@ fn link_matches(links: &[crate::rnconfig::DeepLink], query: &str) -> Vec<usize> 
     links
         .iter()
         .enumerate()
-        .filter(|(_, d)| d.label().to_lowercase().contains(&q) || d.url().to_lowercase().contains(&q))
+        .filter(|(_, d)| {
+            d.label().to_lowercase().contains(&q) || d.url().to_lowercase().contains(&q)
+        })
         .map(|(i, _)| i)
         .collect()
 }
@@ -1503,8 +1745,16 @@ fn render(app: &mut DashApp, frame: &mut Frame) {
     let body = outer[0];
     let status_area = outer[1];
 
-    let halves = Layout::vertical([Constraint::Percentage(app.v_split), Constraint::Percentage(100 - app.v_split)]).split(body);
-    let top = Layout::horizontal([Constraint::Percentage(app.h_split), Constraint::Percentage(100 - app.h_split)]).split(halves[0]);
+    let halves = Layout::vertical([
+        Constraint::Percentage(app.v_split),
+        Constraint::Percentage(100 - app.v_split),
+    ])
+    .split(body);
+    let top = Layout::horizontal([
+        Constraint::Percentage(app.h_split),
+        Constraint::Percentage(100 - app.h_split),
+    ])
+    .split(halves[0]);
     let proc_outer = top[0];
     let dev_outer = top[1];
     let logs_outer = halves[1];
@@ -1524,7 +1774,13 @@ fn render(app: &mut DashApp, frame: &mut Frame) {
         render_help(app, frame, area);
     }
     if app.confirm_quit {
-        let sim = app.ask_delete_sim().then(|| app.devices.iter().find(|d| d.pinned).map(|d| d.label.clone()).unwrap_or_else(|| "the simulator".into()));
+        let sim = app.ask_delete_sim().then(|| {
+            app.devices
+                .iter()
+                .find(|d| d.pinned)
+                .map(|d| d.label.clone())
+                .unwrap_or_else(|| "the simulator".into())
+        });
         render_quit_popup(frame, area, sim);
     }
 }
@@ -1542,12 +1798,20 @@ fn render_link_form(form: &LinkForm, frame: &mut Frame, area: Rect) {
     let h = (form.values.len() as u16 * 2 + 5).min(area.height);
     let r = centered(area, w, h);
     frame.render_widget(Clear, r);
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(format!(" {} ", form.title));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" {} ", form.title));
     let inner = block.inner(r);
     frame.render_widget(block, r);
     let mut lines = vec![Line::raw("")];
     // Names left-aligned in a column as wide as the longest, values lined up after it.
-    let name_w = form.values.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+    let name_w = form
+        .values
+        .iter()
+        .map(|(n, _)| n.chars().count())
+        .max()
+        .unwrap_or(0);
     let room = inner.width.saturating_sub(name_w as u16 + 4) as usize;
     for (i, (name, value)) in form.values.iter().enumerate() {
         let active = i == form.field;
@@ -1555,12 +1819,24 @@ fn render_link_form(form: &LinkForm, frame: &mut Frame, area: Rect) {
         let chars: Vec<char> = value.chars().collect();
         let shown: String = chars[chars.len().saturating_sub(room)..].iter().collect();
         lines.push(Line::from(vec![
-            Span::styled(format!(" {name:<name_w$}  "), if active { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) }),
+            Span::styled(
+                format!(" {name:<name_w$}  "),
+                if active {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
             Span::raw(if active { format!("{shown}█") } else { shown }),
         ]));
         lines.push(Line::raw(""));
     }
-    lines.push(Line::styled(" type or paste · ⇥ next · ⏎ open · esc cancel", Style::default().fg(Color::DarkGray)));
+    lines.push(Line::styled(
+        " type or paste · ⇥ next · ⏎ open · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    ));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1569,7 +1845,9 @@ fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
     let search = app.link_search.as_ref();
     let shown: Vec<usize> = match search {
         Some((q, _)) => link_matches(links, q),
-        None => (0..links.len()).filter(|&i| picker_char(i).is_some()).collect(),
+        None => (0..links.len())
+            .filter(|&i| picker_char(i).is_some())
+            .collect(),
     };
     let key_style = Style::default().fg(Color::Black).bg(Color::Cyan);
 
@@ -1584,20 +1862,43 @@ fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
                 body.push(Line::raw(""));
             }
             heading_rows.push(body.len());
-            body.push(Line::styled(format!(" {}", d.group().unwrap()), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+            body.push(Line::styled(
+                format!(" {}", d.group().unwrap()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
         group = d.group();
         // While searching, keys are typed into the query: ⏎ opens the highlighted match.
         let (key, label) = match search {
-            Some((_, sel)) if *sel == row => ("  ▸".to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Some((_, sel)) if *sel == row => (
+                "  ▸".to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Some(_) => ("   ".to_string(), Style::default()),
-            None => (format!(" {} ", picker_char(i).unwrap_or(' ')), Style::default()),
+            None => (
+                format!(" {} ", picker_char(i).unwrap_or(' ')),
+                Style::default(),
+            ),
         };
         body.push(Line::from(vec![
-            Span::styled(key, if search.is_some() { Style::default().fg(Color::Cyan) } else { key_style }),
+            Span::styled(
+                key,
+                if search.is_some() {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    key_style
+                },
+            ),
             Span::styled(format!("  {}", d.label()), label),
             Span::styled(
-                crate::rnconfig::link_placeholders(d.url()).iter().map(|p| format!(" ‹{p}›")).collect::<String>(),
+                crate::rnconfig::link_placeholders(d.url())
+                    .iter()
+                    .map(|p| format!(" ‹{p}›"))
+                    .collect::<String>(),
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
@@ -1605,15 +1906,26 @@ fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
 
     let mut head: Vec<Line> = Vec::new();
     if let Some((q, _)) = search {
-        head.push(Line::from(vec![Span::styled(" / ", key_style), Span::raw(format!("  {q}█"))]));
+        head.push(Line::from(vec![
+            Span::styled(" / ", key_style),
+            Span::raw(format!("  {q}█")),
+        ]));
         head.push(Line::raw(""));
     }
     let foot: Vec<Line> = vec![
         Line::raw(""),
         if search.is_some() {
-            Line::styled(" type to filter · ↑↓ select · ⏎ open · esc back", Style::default().fg(Color::DarkGray))
+            Line::styled(
+                " type to filter · ↑↓ select · ⏎ open · esc back",
+                Style::default().fg(Color::DarkGray),
+            )
         } else {
-            Line::from(vec![Span::styled(" / ", key_style), Span::raw("  search    "), Span::styled(" : ", key_style), Span::raw("  paste any URL (e.g. a magic login link)")])
+            Line::from(vec![
+                Span::styled(" / ", key_style),
+                Span::raw("  search    "),
+                Span::styled(" : ", key_style),
+                Span::raw("  paste any URL (e.g. a magic login link)"),
+            ])
         },
     ];
 
@@ -1621,7 +1933,13 @@ fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
     let chrome = (head.len() + foot.len() + 2) as u16;
     let split = if body.len() as u16 + chrome > area.height && area.width >= 128 {
         let mid = body.len().div_ceil(2);
-        let at = heading_rows.iter().copied().filter(|&r| r > 0).min_by_key(|&r| r.abs_diff(mid)).filter(|&r| r.abs_diff(mid) <= mid / 3).unwrap_or(mid);
+        let at = heading_rows
+            .iter()
+            .copied()
+            .filter(|&r| r > 0)
+            .min_by_key(|&r| r.abs_diff(mid))
+            .filter(|&r| r.abs_diff(mid) <= mid / 3)
+            .unwrap_or(mid);
         Some(at)
     } else {
         None
@@ -1632,17 +1950,30 @@ fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
     };
     let r = centered(area, w, (rows as u16 + chrome).clamp(6, area.height));
     frame.render_widget(Clear, r);
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(" Deep links · esc ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Deep links · esc ");
     let inner = block.inner(r);
     frame.render_widget(block, r);
-    let [head_area, body_area, foot_area] =
-        Layout::vertical([Constraint::Length(head.len() as u16), Constraint::Min(0), Constraint::Length(foot.len() as u16)]).areas(inner);
+    let [head_area, body_area, foot_area] = Layout::vertical([
+        Constraint::Length(head.len() as u16),
+        Constraint::Min(0),
+        Constraint::Length(foot.len() as u16),
+    ])
+    .areas(inner);
     frame.render_widget(Paragraph::new(Text::from(head)), head_area);
     frame.render_widget(Paragraph::new(Text::from(foot)), foot_area);
     match split {
         Some(at) => {
-            let right: Vec<Line> = body.split_off(at).into_iter().skip_while(|l| l.width() == 0).collect();
-            let [left_area, right_area] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body_area);
+            let right: Vec<Line> = body
+                .split_off(at)
+                .into_iter()
+                .skip_while(|l| l.width() == 0)
+                .collect();
+            let [left_area, right_area] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(body_area);
             frame.render_widget(Paragraph::new(Text::from(body)), left_area);
             frame.render_widget(Paragraph::new(Text::from(right)), right_area);
         }
@@ -1654,68 +1985,95 @@ type KeySection = (&'static str, &'static [(&'static str, &'static str)]);
 
 // Left / right columns of the `?` popup (stacked when the terminal is narrow).
 const HELP_LEFT: &[KeySection] = &[
-    ("Global", &[
-        ("⇥ / ⇧⇥", "next / previous pane"),
-        ("^←→↑↓", "resize panes"),
-        ("R", "reload the app"),
-        ("D", "open the dev menu"),
-        ("?", "this help"),
-        ("q / ^C", "quit"),
-    ]),
-    ("Every pane", &[
-        ("j k  ↑ ↓", "move / scroll"),
-        ("g  G", "top / bottom"),
-        ("space", "autoscroll on/off"),
-        ("[  ]", "previous / next tab"),
-    ]),
-    ("Processes", &[
-        ("⏎", "type into the process (Esc leaves)"),
-        ("x", "stop it"),
-        ("d", "delete a stopped tab"),
-        ("m", "start / restart Metro (takes over an external one)"),
-        ("c", "deep clean (reinstalls)"),
-        ("i", "reinstall deps + pods"),
-        ("a", "reset: deep clean, then Metro"),
-    ]),
-    ("Devices", &[
-        ("⏎", "start the simulator / emulator"),
-        ("s", "stop it"),
-        ("b", "build & run on it"),
-        ("o", "open the app"),
-        ("l", "open a deep link (fills ‹placeholders›; / search, : any URL)"),
-    ]),
+    (
+        "Global",
+        &[
+            ("⇥ / ⇧⇥", "next / previous pane"),
+            ("^←→↑↓", "resize panes"),
+            ("R", "reload the app"),
+            ("D", "open the dev menu"),
+            ("?", "this help"),
+            ("q / ^C", "quit"),
+        ],
+    ),
+    (
+        "Every pane",
+        &[
+            ("j k  ↑ ↓", "move / scroll"),
+            ("g  G", "top / bottom"),
+            ("space", "autoscroll on/off"),
+            ("[  ]", "previous / next tab"),
+        ],
+    ),
+    (
+        "Processes",
+        &[
+            ("⏎", "type into the process (Esc leaves)"),
+            ("x", "stop it"),
+            ("d", "delete a stopped tab"),
+            ("m", "start / restart Metro (takes over an external one)"),
+            ("c", "deep clean (reinstalls)"),
+            ("i", "reinstall deps + pods"),
+            ("a", "reset: deep clean, then Metro"),
+        ],
+    ),
+    (
+        "Devices",
+        &[
+            ("⏎", "start the simulator / emulator"),
+            ("s", "stop it"),
+            ("b", "build & run on it"),
+            ("o", "open the app"),
+            (
+                "l",
+                "open a deep link (fills ‹placeholders›; / search, : any URL)",
+            ),
+        ],
+    ),
 ];
 
 const HELP_RIGHT: &[KeySection] = &[
-    ("Logs · Network · Perf", &[
-        ("1-9", "switch device"),
-        ("/  n N", "search, next / previous match"),
-        ("f", "filter"),
-        ("⏎", "open the entry"),
-        ("z", "open maximized / toggle split"),
-        ("V", "visual select, then y"),
-        ("y", "copy"),
-        ("c", "clear"),
-        ("p", "clear on reload on/off"),
-    ]),
-    ("Open entry", &[
-        ("⏎ / Esc", "close"),
-        ("J K", "scroll the entry (split view)"),
-        ("{  }", "previous / next section"),
-        ("o", "open file:line in nvim"),
-        ("F", "show framework stack frames"),
-    ]),
-    ("Network", &[
-        ("e", "errors only"),
-        ("m", "cycle method filter"),
-        ("c / C", "copy as curl"),
-    ]),
-    ("Debugger (paused)", &[
-        ("F5", "continue"),
-        ("F10", "step over"),
-        ("F11 / ⇧F11", "step into / out"),
-        ("F6", "pause"),
-    ]),
+    (
+        "Logs · Network · Perf",
+        &[
+            ("1-9", "switch device"),
+            ("/  n N", "search, next / previous match"),
+            ("f", "filter"),
+            ("⏎", "open the entry"),
+            ("z", "open maximized / toggle split"),
+            ("V", "visual select, then y"),
+            ("y", "copy"),
+            ("c", "clear"),
+            ("p", "clear on reload on/off"),
+        ],
+    ),
+    (
+        "Open entry",
+        &[
+            ("⏎ / Esc", "close"),
+            ("J K", "scroll the entry (split view)"),
+            ("{  }", "previous / next section"),
+            ("o", "open file:line in nvim"),
+            ("F", "show framework stack frames"),
+        ],
+    ),
+    (
+        "Network",
+        &[
+            ("e", "errors only"),
+            ("m", "cycle method filter"),
+            ("c / C", "copy as curl"),
+        ],
+    ),
+    (
+        "Debugger (paused)",
+        &[
+            ("F5", "continue"),
+            ("F10", "step over"),
+            ("F11 / ⇧F11", "step into / out"),
+            ("F6", "pause"),
+        ],
+    ),
 ];
 
 fn help_lines(sections: &[KeySection]) -> Vec<Line<'static>> {
@@ -1724,7 +2082,12 @@ fn help_lines(sections: &[KeySection]) -> Vec<Line<'static>> {
         if i > 0 {
             lines.push(Line::raw(""));
         }
-        lines.push(Line::styled(format!(" {title}"), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        lines.push(Line::styled(
+            format!(" {title}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
         for (k, desc) in keys.iter() {
             lines.push(Line::from(vec![
                 Span::styled(format!("   {k:<12}"), Style::default().fg(Color::Yellow)),
@@ -1738,7 +2101,11 @@ fn help_lines(sections: &[KeySection]) -> Vec<Line<'static>> {
 fn render_help(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     let (left, right) = (help_lines(HELP_LEFT), help_lines(HELP_RIGHT));
     let two_cols = area.width >= 110;
-    let content_h = if two_cols { left.len().max(right.len()) } else { left.len() + 1 + right.len() } as u16;
+    let content_h = if two_cols {
+        left.len().max(right.len())
+    } else {
+        left.len() + 1 + right.len()
+    } as u16;
     let w = if two_cols { 120 } else { 64 };
     let r = centered(area, w, content_h + 2);
     frame.render_widget(Clear, r);
@@ -1750,10 +2117,14 @@ fn render_help(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     let inner = block.inner(r);
     frame.render_widget(block, r);
     // Clamp the scroll so G lands on the last page.
-    let top = app.help.unwrap_or(0).min(content_h.saturating_sub(inner.height));
+    let top = app
+        .help
+        .unwrap_or(0)
+        .min(content_h.saturating_sub(inner.height));
     app.help = Some(top);
     if two_cols {
-        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
         frame.render_widget(Paragraph::new(Text::from(left)).scroll((top, 0)), cols[0]);
         frame.render_widget(Paragraph::new(Text::from(right)).scroll((top, 0)), cols[1]);
     } else {
@@ -1767,14 +2138,22 @@ fn render_help(app: &mut DashApp, frame: &mut Frame, area: Rect) {
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
-    Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
 }
 
 fn render_quit_popup(frame: &mut Frame, area: Rect, created_sim: Option<String>) {
     if let Some(sim) = created_sim {
         let r = centered(area, 64, 6);
         frame.render_widget(Clear, r);
-        let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit signalbox? ");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" Quit signalbox? ");
         let inner = block.inner(r);
         frame.render_widget(block, r);
         let lines = vec![
@@ -1796,7 +2175,10 @@ fn render_quit_popup(frame: &mut Frame, area: Rect, created_sim: Option<String>)
     }
     let r = centered(area, 50, 5);
     frame.render_widget(Clear, r); // wipe whatever's underneath
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" Quit signalbox? ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Quit signalbox? ");
     let inner = block.inner(r);
     frame.render_widget(block, r);
     let lines = vec![
@@ -1841,9 +2223,17 @@ fn split_hint(inner: Rect) -> (Rect, Option<Rect>) {
 /// pane is focused, blank otherwise — so only the active pane shows its keys.
 fn render_hint(frame: &mut Frame, area: Rect, text: &str, focused: bool) {
     let w = area.width as usize;
-    let (content, style) = if focused { (text.to_string(), bar_style()) } else { (String::new(), Style::default()) };
+    let (content, style) = if focused {
+        (text.to_string(), bar_style())
+    } else {
+        (String::new(), Style::default())
+    };
     let n = content.chars().count();
-    let padded = if n >= w { content.chars().take(w).collect::<String>() } else { format!("{content}{}", " ".repeat(w - n)) };
+    let padded = if n >= w {
+        content.chars().take(w).collect::<String>()
+    } else {
+        format!("{content}{}", " ".repeat(w - n))
+    };
     frame.render_widget(Paragraph::new(padded).style(style), area);
 }
 
@@ -1879,14 +2269,27 @@ fn render_processes(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     } else {
         format!(" Processes  {tabs} ")
     };
-    let block = Block::default().borders(Borders::ALL).border_style(focus_border(focused)).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border(focused))
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let (content, hint) = split_hint(inner);
     // Reserve the top line of the pane for the command that produced this output.
     let (cmd_area, body) = if content.height >= 2 {
-        let cmd_area = Rect { x: content.x, y: content.y, width: content.width, height: 1 };
-        let body = Rect { x: content.x, y: content.y + 1, width: content.width, height: content.height - 1 };
+        let cmd_area = Rect {
+            x: content.x,
+            y: content.y,
+            width: content.width,
+            height: 1,
+        };
+        let body = Rect {
+            x: content.x,
+            y: content.y + 1,
+            width: content.width,
+            height: content.height - 1,
+        };
         (Some(cmd_area), body)
     } else {
         (None, content)
@@ -1907,41 +2310,71 @@ fn render_processes(app: &mut DashApp, frame: &mut Frame, area: Rect) {
                     (false, n) => format!("  [paused ↑{n}]"),
                 };
                 let head = format!("$ {}{marker}", p.cmd);
-                frame.render_widget(Paragraph::new(head).style(Style::default().fg(Color::DarkGray)), ca);
+                frame.render_widget(
+                    Paragraph::new(head).style(Style::default().fg(Color::DarkGray)),
+                    ca,
+                );
             }
             let lines = pty_lines(&p.parser(), body.width, body.height);
             frame.render_widget(Paragraph::new(Text::from(lines)), body);
         }
         None => {
-            let msg = Paragraph::new("Press  m  to start Metro.").style(Style::default().fg(Color::DarkGray));
+            let msg = Paragraph::new("Press  m  to start Metro.")
+                .style(Style::default().fg(Color::DarkGray));
             frame.render_widget(msg, body);
         }
     }
     if let Some(h) = hint {
-        render_hint(frame, h, " ⏎ type · x stop · d delete · m metro · c clean · i install · a reset", focused);
+        render_hint(
+            frame,
+            h,
+            " ⏎ type · x stop · d delete · m metro · c clean · i install · a reset",
+            focused,
+        );
     }
 }
 
 fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     let focused = app.focus == Pane::Devices;
-    let block = Block::default().borders(Borders::ALL).border_style(focus_border(focused)).title(" Devices & Actions ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border(focused))
+        .title(" Devices & Actions ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let (content, hint) = split_hint(inner);
 
-    let metro_up = app.metro_idx.and_then(|i| app.procs.get(i)).map(|p| p.is_alive()).unwrap_or(false);
+    let metro_up = app
+        .metro_idx
+        .and_then(|i| app.procs.get(i))
+        .map(|p| p.is_alive())
+        .unwrap_or(false);
     let metro_line = if metro_up {
         Line::from(vec![
             Span::styled("Metro  ● ", Style::default().fg(Color::Green)),
-            Span::raw(format!("running :{}{}", app.project.metro_port(), if app.metro_external { " (external)" } else { "" })),
+            Span::raw(format!(
+                "running :{}{}",
+                app.project.metro_port(),
+                if app.metro_external {
+                    " (external)"
+                } else {
+                    ""
+                }
+            )),
         ])
     } else {
-        Line::from(vec![Span::styled("Metro  ○ ", Style::default().fg(Color::DarkGray)), Span::raw("stopped  (m)")])
+        Line::from(vec![
+            Span::styled("Metro  ○ ", Style::default().fg(Color::DarkGray)),
+            Span::raw("stopped  (m)"),
+        ])
     };
 
     let mut lines: Vec<Line> = vec![metro_line, Line::raw("")];
     if app.devices.is_empty() {
-        lines.push(Line::styled("  (no simulators/emulators found)", Style::default().fg(Color::DarkGray)));
+        lines.push(Line::styled(
+            "  (no simulators/emulators found)",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
     let mut group = None;
     let mut sel_line = 0;
@@ -1951,7 +2384,12 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
             if i > 0 {
                 lines.push(Line::raw(""));
             }
-            lines.push(Line::styled(format!(" {}", d.group().1), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+            lines.push(Line::styled(
+                format!(" {}", d.group().1),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
         let marker = if d.running {
             Span::styled("● ", Style::default().fg(Color::Green))
@@ -1966,10 +2404,17 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
         } else {
             Style::default()
         };
-        let mut spans = vec![Span::raw(" "), marker, Span::styled(d.label.clone(), name_style)];
+        let mut spans = vec![
+            Span::raw(" "),
+            marker,
+            Span::styled(d.label.clone(), name_style),
+        ];
         // The highlighted device's id, for `--device` in signalbox, boop and simon.
         if focused && i == app.dev_sel && d.id != d.label {
-            spans.push(Span::styled(format!("  {}", d.id), Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                format!("  {}", d.id),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         // App-presence tags (only meaningful with a configured bundleId).
         match d.installed {
@@ -1981,10 +2426,16 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
             spans.push(Span::styled("  ▶fg", Style::default().fg(Color::Cyan)));
         }
         if let Some(t) = &d.detail {
-            spans.push(Span::styled(format!("  {t}"), Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                format!("  {t}"),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         if let Some(p) = &d.problem {
-            spans.push(Span::styled(format!("  ⚠ {p}"), Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(
+                format!("  ⚠ {p}"),
+                Style::default().fg(Color::Yellow),
+            ));
         }
         lines.push(Line::from(spans));
     }
@@ -2001,13 +2452,21 @@ fn render_devices(app: &mut DashApp, frame: &mut Frame, area: Rect) {
             Some(_) => "⏎ start · ",
             None => "",
         };
-        render_hint(frame, h, &format!(" {power}b build · o open · l links"), focused);
+        render_hint(
+            frame,
+            h,
+            &format!(" {power}b build · o open · l links"),
+            focused,
+        );
     }
 }
 
 fn render_logs(app: &mut DashApp, frame: &mut Frame, area: Rect) {
     let focused = app.focus == Pane::Logs;
-    let block = Block::default().borders(Borders::ALL).border_style(focus_border(focused)).title(" JS Logs / Network / Perf ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border(focused))
+        .title(" JS Logs / Network / Perf ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.rnview.set_focused(focused); // dim its footer when another pane is active
@@ -2018,7 +2477,10 @@ fn render_status(app: &DashApp, frame: &mut Frame, area: Rect) {
     // A suspended VM takes over the status bar (red) so it's unmissable.
     let paused = app.rnview.active_paused();
     let style = if paused.is_some() {
-        Style::default().bg(Color::Rgb(191, 97, 106)).fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(Color::Rgb(191, 97, 106))
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().bg(Color::Rgb(59, 66, 82)).fg(Color::White)
     };
@@ -2029,7 +2491,12 @@ fn render_status(app: &DashApp, frame: &mut Frame, area: Rect) {
         format!(" {f}")
     } else if app.input_mode {
         " INPUT — keys go to the process · Esc to exit".into()
-    } else if let Some(e) = app.client.dap_error.as_ref().filter(|_| app.started.elapsed() < Duration::from_secs(10)) {
+    } else if let Some(e) = app
+        .client
+        .dap_error
+        .as_ref()
+        .filter(|_| app.started.elapsed() < Duration::from_secs(10))
+    {
         format!(" ⚠ {e}")
     } else {
         " ⇥ focus · ^←→↑↓ resize · R reload · D dev-menu · ? keys · q quit".into()
@@ -2046,7 +2513,11 @@ fn render_status(app: &DashApp, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(padded).style(style), area);
 }
 
-fn pty_lines(parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, width: u16, height: u16) -> Vec<Line<'static>> {
+fn pty_lines(
+    parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
+    width: u16,
+    height: u16,
+) -> Vec<Line<'static>> {
     let guard = match parser.lock() {
         Ok(g) => g,
         Err(_) => return Vec::new(),
@@ -2064,7 +2535,10 @@ fn pty_lines(parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, width: u1
             let (glyph, style) = match screen.cell(row, col) {
                 Some(cell) => {
                     let g = cell.contents();
-                    (if g.is_empty() { " ".to_string() } else { g }, cell_style(cell))
+                    (
+                        if g.is_empty() { " ".to_string() } else { g },
+                        cell_style(cell),
+                    )
                 }
                 None => (" ".to_string(), Style::default()),
             };

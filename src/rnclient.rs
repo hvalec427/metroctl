@@ -25,7 +25,9 @@ thread_local! {
 }
 
 /// Next frame for this connection: a backlogged one first, else the socket.
-fn next_frame(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>) -> tungstenite::Result<tungstenite::Message> {
+fn next_frame(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+) -> tungstenite::Result<tungstenite::Message> {
     match BACKLOG.with(|b| b.borrow_mut().pop_front()) {
         Some(t) => Ok(tungstenite::Message::Text(t)),
         None => socket.read(),
@@ -36,11 +38,18 @@ fn cdp_trace(tag: &str, msg: &str) {
     let path = CDP_TRACE.get_or_init(|| crate::rnconfig::env("CDP_DEBUG"));
     if let Some(p) = path {
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+        {
             let trimmed: String = msg.chars().take(600).collect();
             // Events put "method" last (after any request "method": "POST"), so it is
             // often cut off above.
-            let method = msg.rfind("\"method\":\"").and_then(|i| msg[i + 10..].split('"').next()).unwrap_or("");
+            let method = msg
+                .rfind("\"method\":\"")
+                .and_then(|i| msg[i + 10..].split('"').next())
+                .unwrap_or("");
             let _ = writeln!(f, "{tag} [{method}] {trimmed}");
         }
     }
@@ -64,10 +73,17 @@ pub struct DapFrame {
 /// Async debugger notifications pushed to an attached DAP session (one per
 /// connected editor). Separate from `RnEvent`, which drives the TUI.
 pub enum DebugEvent {
-    Paused { frames: Vec<DapFrame>, reason: String, raw_frames: Value },
+    Paused {
+        frames: Vec<DapFrame>,
+        reason: String,
+        raw_frames: Value,
+    },
     Resumed,
     /// A console line / exception, mirrored to the editor's debug console.
-    Output { category: String, output: String },
+    Output {
+        category: String,
+        output: String,
+    },
 }
 
 /// Shared slot holding the attached DAP session's event stream. It lives above
@@ -93,7 +109,7 @@ pub struct LogEntry {
     pub level: String, // log | warn | error | info | ...
     pub text: String,
     pub expanded: Option<Vec<String>>, // deep object tree (already fetched), if any
-    pub stack: Option<Vec<String>>,    // call frames ("fn (file:line)"); framework ones start with FRAMEWORK_FRAME
+    pub stack: Option<Vec<String>>, // call frames ("fn (file:line)"); framework ones start with FRAMEWORK_FRAME
 }
 
 #[derive(Debug, Clone, Default)]
@@ -109,9 +125,9 @@ pub struct NetRecord {
     pub res_body: Option<String>,
     pub start_ts: Option<f64>,
     pub duration_ms: Option<f64>,
-    pub size: Option<i64>,       // bytes over the wire (encodedDataLength)
-    pub failed: Option<String>,  // error text when the request failed
-    pub is_ws: bool,             // a WebSocket connection
+    pub size: Option<i64>,      // bytes over the wire (encodedDataLength)
+    pub failed: Option<String>, // error text when the request failed
+    pub is_ws: bool,            // a WebSocket connection
     pub ws_frames: Vec<(bool, String)>, // (sent?, payload) for WS frames
 }
 
@@ -164,7 +180,11 @@ pub enum ConnCmd {
     Pause,
     /// Synchronous CDP call on behalf of a DAP session (scopes/variables/eval):
     /// send `method`+`params`, reply with the CDP `result`.
-    DebugRequest { method: String, params: Value, reply: Sender<Value> },
+    DebugRequest {
+        method: String,
+        params: Value,
+        reply: Sender<Value>,
+    },
 }
 
 pub struct RnClient {
@@ -178,7 +198,8 @@ pub struct RnClient {
 impl RnClient {
     pub fn start(port: u16) -> RnClient {
         let (tx, rx) = std::sync::mpsc::channel();
-        let cmd_senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cmd_senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let debug_sink: DebugSink = Arc::new(Mutex::new(None));
         let bundle: UrlSlot = Arc::new(Mutex::new(None));
         let senders = cmd_senders.clone();
@@ -195,7 +216,12 @@ impl RnClient {
             }
             Err(e) => Some(e),
         };
-        RnClient { rx, cmd_senders, port, dap_error }
+        RnClient {
+            rx,
+            cmd_senders,
+            port,
+            dap_error,
+        }
     }
 
     pub fn send(&self, key: &str, cmd: ConnCmd) {
@@ -209,11 +235,27 @@ impl RnClient {
     }
 }
 
-fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>, debug_sink: DebugSink, bundle: UrlSlot) {
+fn poll_loop(
+    port: u16,
+    tx: Sender<RnEvent>,
+    senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>,
+    debug_sink: DebugSink,
+    bundle: UrlSlot,
+) {
     loop {
         if let Ok(targets) = fetch_targets(port) {
-            let live: Vec<_> = targets.into_iter().filter(|t| t.web_socket_debugger_url.is_some()).collect();
-            let infos: Vec<TargetInfo> = live.iter().map(|t| TargetInfo { key: t.key(), label: t.label(), meta: t.vm.clone() }).collect();
+            let live: Vec<_> = targets
+                .into_iter()
+                .filter(|t| t.web_socket_debugger_url.is_some())
+                .collect();
+            let infos: Vec<TargetInfo> = live
+                .iter()
+                .map(|t| TargetInfo {
+                    key: t.key(),
+                    label: t.label(),
+                    meta: t.vm.clone(),
+                })
+                .collect();
             let _ = tx.send(RnEvent::Targets(infos));
             for t in live {
                 let key = t.key();
@@ -240,7 +282,15 @@ fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, 
     }
 }
 
-fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receiver<ConnCmd>, debug_sink: &DebugSink, bundle: &UrlSlot) {
+fn conn_loop(
+    key: &str,
+    url: &str,
+    port: u16,
+    tx: &Sender<RnEvent>,
+    crx: Receiver<ConnCmd>,
+    debug_sink: &DebugSink,
+    bundle: &UrlSlot,
+) {
     let _ = tx.send(RnEvent::Status(key.into(), Status::Connecting));
     let mut socket = match connect_cdp(url, port) {
         Ok(s) => s,
@@ -255,7 +305,9 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
     let mut seq = 100i64;
     let mut send = |socket: &mut tungstenite::WebSocket<_>, method: &str| {
         seq += 1;
-        let _ = socket.send(tungstenite::Message::Text(json!({"id": seq, "method": method}).to_string()));
+        let _ = socket.send(tungstenite::Message::Text(
+            json!({"id": seq, "method": method}).to_string(),
+        ));
     };
     send(&mut socket, "Runtime.enable");
     send(&mut socket, "Log.enable");
@@ -264,7 +316,12 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
     // If Hermes started paused waiting for a debugger, let it run; harmless on an
     // already-running VM.
     send(&mut socket, "Runtime.runIfWaitingForDebugger");
-    cdp_trace("--", &format!("connected {key}: sent Runtime/Log/Network/Debugger.enable + runIfWaitingForDebugger"));
+    cdp_trace(
+        "--",
+        &format!(
+            "connected {key}: sent Runtime/Log/Network/Debugger.enable + runIfWaitingForDebugger"
+        ),
+    );
     let _ = tx.send(RnEvent::Status(key.into(), Status::Connected));
     let _ = tx.send(RnEvent::Network(key.into(), true));
 
@@ -287,13 +344,37 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
             seq += 1;
             let rid = seq;
             let _ = socket.send(tungstenite::Message::Text(json!({"id": rid, "method": "Runtime.evaluate", "params": {"expression": FPS_EXPR, "returnByValue": true}}).to_string()));
-            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, debug_sink) {
+            if let Some(r) = request_response(
+                &mut socket,
+                rid,
+                key,
+                tx,
+                &mut records,
+                &mut seq,
+                port,
+                &mut paused,
+                &mut scripts,
+                debug_sink,
+            ) {
                 sample.fps = r["result"]["value"].as_i64();
             }
             seq += 1;
             let rid = seq;
-            let _ = socket.send(tungstenite::Message::Text(json!({"id": rid, "method": "Runtime.getHeapUsage"}).to_string()));
-            if let Some(r) = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, debug_sink) {
+            let _ = socket.send(tungstenite::Message::Text(
+                json!({"id": rid, "method": "Runtime.getHeapUsage"}).to_string(),
+            ));
+            if let Some(r) = request_response(
+                &mut socket,
+                rid,
+                key,
+                tx,
+                &mut records,
+                &mut seq,
+                port,
+                &mut paused,
+                &mut scripts,
+                debug_sink,
+            ) {
                 sample.heap_used = r["usedSize"].as_i64();
                 sample.heap_total = r["totalSize"].as_i64();
             }
@@ -303,28 +384,51 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
         while let Ok(cmd) = crx.try_recv() {
             match cmd {
                 ConnCmd::Reload => {
-                    let _ = socket.send(tungstenite::Message::Text(json!({"id": 1, "method": "Page.reload"}).to_string()));
-                    let _ = socket.send(tungstenite::Message::Text(json!({"id": 2, "method": "ReactNativeApplication.reload"}).to_string()));
+                    let _ = socket.send(tungstenite::Message::Text(
+                        json!({"id": 1, "method": "Page.reload"}).to_string(),
+                    ));
+                    let _ = socket.send(tungstenite::Message::Text(
+                        json!({"id": 2, "method": "ReactNativeApplication.reload"}).to_string(),
+                    ));
                 }
                 ConnCmd::DiscardConsole => {
                     records.clear();
-                    let _ = socket.send(tungstenite::Message::Text(json!({"id": 3, "method": "Runtime.discardConsoleEntries"}).to_string()));
-                    let _ = socket.send(tungstenite::Message::Text(json!({"id": 4, "method": "Log.clear"}).to_string()));
+                    let _ = socket.send(tungstenite::Message::Text(
+                        json!({"id": 3, "method": "Runtime.discardConsoleEntries"}).to_string(),
+                    ));
+                    let _ = socket.send(tungstenite::Message::Text(
+                        json!({"id": 4, "method": "Log.clear"}).to_string(),
+                    ));
                 }
                 ConnCmd::Continue => debug_cmd(&mut socket, &mut seq, "Debugger.resume"),
                 ConnCmd::StepOver => debug_cmd(&mut socket, &mut seq, "Debugger.stepOver"),
                 ConnCmd::StepInto => debug_cmd(&mut socket, &mut seq, "Debugger.stepInto"),
                 ConnCmd::StepOut => debug_cmd(&mut socket, &mut seq, "Debugger.stepOut"),
                 ConnCmd::Pause => debug_cmd(&mut socket, &mut seq, "Debugger.pause"),
-                ConnCmd::DebugRequest { method, params, reply } => {
+                ConnCmd::DebugRequest {
+                    method,
+                    params,
+                    reply,
+                } => {
                     seq += 1;
                     let rid = seq;
                     cdp_trace(">>", &method);
                     let _ = socket.send(tungstenite::Message::Text(
                         json!({"id": rid, "method": method, "params": params}).to_string(),
                     ));
-                    let result = request_response(&mut socket, rid, key, tx, &mut records, &mut seq, port, &mut paused, &mut scripts, debug_sink)
-                        .unwrap_or(Value::Null);
+                    let result = request_response(
+                        &mut socket,
+                        rid,
+                        key,
+                        tx,
+                        &mut records,
+                        &mut seq,
+                        port,
+                        &mut paused,
+                        &mut scripts,
+                        debug_sink,
+                    )
+                    .unwrap_or(Value::Null);
                     let _ = reply.send(result);
                 }
             }
@@ -333,7 +437,18 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
             Ok(tungstenite::Message::Text(t)) => {
                 cdp_trace("<<", &t);
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    handle_message(key, &v, tx, &mut records, &mut socket, &mut seq, port, &mut paused, &mut scripts, debug_sink);
+                    handle_message(
+                        key,
+                        &v,
+                        tx,
+                        &mut records,
+                        &mut socket,
+                        &mut seq,
+                        port,
+                        &mut paused,
+                        &mut scripts,
+                        debug_sink,
+                    );
                 }
                 // Surface the app's main bundle URL for the DAP source-map fetch.
                 if bundle.lock().unwrap().is_none() {
@@ -344,7 +459,9 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
             }
             Ok(tungstenite::Message::Close(_)) => break,
             Ok(_) => {}
-            Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(tungstenite::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(_) => break,
         }
     }
@@ -352,10 +469,16 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
 }
 
 /// Send a parameterless Debugger command, allocating a fresh request id.
-fn debug_cmd(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, seq: &mut i64, method: &str) {
+fn debug_cmd(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    seq: &mut i64,
+    method: &str,
+) {
     *seq += 1;
     cdp_trace(">>", method);
-    let _ = socket.send(tungstenite::Message::Text(json!({"id": *seq, "method": method}).to_string()));
+    let _ = socket.send(tungstenite::Message::Text(
+        json!({"id": *seq, "method": method}).to_string(),
+    ));
 }
 
 /// Learn scriptId → URL from a CDP stackTrace (console/exception frames carry
@@ -365,7 +488,9 @@ fn learn_scripts(scripts: &mut HashMap<String, String>, st: &Value) {
         for f in frames {
             if let (Some(sid), Some(url)) = (f["scriptId"].as_str(), f["url"].as_str()) {
                 if !url.is_empty() {
-                    scripts.entry(sid.to_string()).or_insert_with(|| url.to_string());
+                    scripts
+                        .entry(sid.to_string())
+                        .or_insert_with(|| url.to_string());
                 }
             }
         }
@@ -398,10 +523,14 @@ fn request_response(
                     if v.get("id").and_then(|i| i.as_i64()) == Some(id) {
                         return v.get("result").cloned();
                     }
-                    handle_message(key, &v, tx, records, socket, seq, port, paused, scripts, debug_sink);
+                    handle_message(
+                        key, &v, tx, records, socket, seq, port, paused, scripts, debug_sink,
+                    );
                 }
             }
-            Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(tungstenite::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
             _ => return None,
         }
     }
@@ -424,11 +553,27 @@ fn handle_message(
     match method {
         "Debugger.paused" => {
             *paused = true;
-            let frames = msg["params"]["callFrames"].as_array().cloned().unwrap_or_default();
-            let reason = msg["params"]["reason"].as_str().unwrap_or("breakpoint").to_string();
+            let frames = msg["params"]["callFrames"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let reason = msg["params"]["reason"]
+                .as_str()
+                .unwrap_or("breakpoint")
+                .to_string();
             let dap_frames = symbolicate_frames(port, &frames, scripts);
-            let (file, line) = dap_frames.first().map(|f| (f.file.clone(), f.line)).unwrap_or_default();
-            let _ = tx.send(RnEvent::Paused(key.into(), PausedInfo { file, line, reason: reason.clone() }));
+            let (file, line) = dap_frames
+                .first()
+                .map(|f| (f.file.clone(), f.line))
+                .unwrap_or_default();
+            let _ = tx.send(RnEvent::Paused(
+                key.into(),
+                PausedInfo {
+                    file,
+                    line,
+                    reason: reason.clone(),
+                },
+            ));
             if let Some(de) = debug_sink.lock().unwrap().as_ref() {
                 let _ = de.send(DebugEvent::Paused {
                     frames: dap_frames,
@@ -448,7 +593,9 @@ fn handle_message(
             let p = &msg["params"];
             if let (Some(sid), Some(url)) = (p["scriptId"].as_str(), p["url"].as_str()) {
                 if !url.is_empty() {
-                    scripts.entry(sid.to_string()).or_insert_with(|| url.to_string());
+                    scripts
+                        .entry(sid.to_string())
+                        .or_insert_with(|| url.to_string());
                 }
             }
         }
@@ -460,8 +607,15 @@ fn handle_message(
             let text = args.iter().map(render_arg).collect::<Vec<_>>().join(" ");
             // Mirror to the editor's debug console (before `text`/`level` move).
             if let Some(de) = debug_sink.lock().unwrap().as_ref() {
-                let category = if level == "error" || level == "assert" { "stderr" } else { "stdout" };
-                let _ = de.send(DebugEvent::Output { category: category.into(), output: format!("{text}\n") });
+                let category = if level == "error" || level == "assert" {
+                    "stderr"
+                } else {
+                    "stdout"
+                };
+                let _ = de.send(DebugEvent::Output {
+                    category: category.into(),
+                    output: format!("{text}\n"),
+                });
             }
             // Eagerly expand the first object arg into a JS tree via getProperties.
             let mut expanded = None;
@@ -476,24 +630,55 @@ fn handle_message(
                 }
             }
             let stack = stack_frames(&p["stackTrace"], port);
-            let _ = tx.send(RnEvent::Log(key.into(), LogEntry { kind: "console".into(), level, text, expanded, stack }));
+            let _ = tx.send(RnEvent::Log(
+                key.into(),
+                LogEntry {
+                    kind: "console".into(),
+                    level,
+                    text,
+                    expanded,
+                    stack,
+                },
+            ));
         }
         "Log.entryAdded" => {
             let e = &msg["params"]["entry"];
             let _ = tx.send(RnEvent::Log(
                 key.into(),
-                LogEntry { kind: "console".into(), level: e["level"].as_str().unwrap_or("log").into(), text: e["text"].as_str().unwrap_or("").into(), expanded: None, stack: stack_frames(&e["stackTrace"], port) },
+                LogEntry {
+                    kind: "console".into(),
+                    level: e["level"].as_str().unwrap_or("log").into(),
+                    text: e["text"].as_str().unwrap_or("").into(),
+                    expanded: None,
+                    stack: stack_frames(&e["stackTrace"], port),
+                },
             ));
         }
         "Runtime.exceptionThrown" => {
             let d = &msg["params"]["exceptionDetails"];
             learn_scripts(scripts, &d["stackTrace"]);
-            let text = d["exception"]["description"].as_str().or_else(|| d["text"].as_str()).unwrap_or("Uncaught exception").to_string();
+            let text = d["exception"]["description"]
+                .as_str()
+                .or_else(|| d["text"].as_str())
+                .unwrap_or("Uncaught exception")
+                .to_string();
             if let Some(de) = debug_sink.lock().unwrap().as_ref() {
-                let _ = de.send(DebugEvent::Output { category: "stderr".into(), output: format!("{text}\n") });
+                let _ = de.send(DebugEvent::Output {
+                    category: "stderr".into(),
+                    output: format!("{text}\n"),
+                });
             }
             let stack = stack_frames(&d["stackTrace"], port);
-            let _ = tx.send(RnEvent::Log(key.into(), LogEntry { kind: "console".into(), level: "error".into(), text, expanded: None, stack }));
+            let _ = tx.send(RnEvent::Log(
+                key.into(),
+                LogEntry {
+                    kind: "console".into(),
+                    level: "error".into(),
+                    text,
+                    expanded: None,
+                    stack,
+                },
+            ));
         }
         "Runtime.executionContextsCleared" => {
             records.clear();
@@ -502,7 +687,9 @@ fn handle_message(
         "Runtime.executionContextCreated" => {
             let _ = tx.send(RnEvent::ContextCreated(key.into()));
         }
-        m if m.starts_with("Network.") => handle_network(key, m, &msg["params"], tx, records, socket, seq),
+        m if m.starts_with("Network.") => {
+            handle_network(key, m, &msg["params"], tx, records, socket, seq)
+        }
         _ => {}
     }
 }
@@ -569,13 +756,25 @@ fn handle_network(
                 if let (Some(start), Some(end)) = (rec.start_ts, p["timestamp"].as_f64()) {
                     rec.duration_ms = Some(((end - start) * 1000.0).max(0.0));
                 }
-                rec.failed = Some(p["errorText"].as_str().unwrap_or("request failed").to_string());
+                rec.failed = Some(
+                    p["errorText"]
+                        .as_str()
+                        .unwrap_or("request failed")
+                        .to_string(),
+                );
                 let _ = tx.send(RnEvent::Net(key.into(), rec.clone()));
             }
         }
         // WebSocket traffic (GraphQL subscriptions, live sockets).
         "Network.webSocketCreated" => {
-            let rec = NetRecord { id: id.clone(), method: "WS".into(), url: p["url"].as_str().unwrap_or("").into(), is_ws: true, start_ts: p["timestamp"].as_f64(), ..Default::default() };
+            let rec = NetRecord {
+                id: id.clone(),
+                method: "WS".into(),
+                url: p["url"].as_str().unwrap_or("").into(),
+                is_ws: true,
+                start_ts: p["timestamp"].as_f64(),
+                ..Default::default()
+            };
             records.insert(id.clone(), rec.clone());
             let _ = tx.send(RnEvent::Net(key.into(), rec));
         }
@@ -585,7 +784,10 @@ fn handle_network(
                 let fr = &p["response"];
                 let payload = match fr["opcode"].as_i64() {
                     Some(1) | None => fr["payloadData"].as_str().unwrap_or("").to_string(),
-                    Some(2) => format!("[binary {} bytes]", fr["payloadData"].as_str().map(|s| s.len()).unwrap_or(0)),
+                    Some(2) => format!(
+                        "[binary {} bytes]",
+                        fr["payloadData"].as_str().map(|s| s.len()).unwrap_or(0)
+                    ),
                     Some(op) => format!("[opcode {op}]"),
                 };
                 rec.ws_frames.push((sent, payload));
@@ -640,7 +842,11 @@ fn stack_frames(st: &Value, port: u16) -> Option<Vec<String>> {
 /// mapped frames (each with `methodName`/`file`/`lineNumber`/`collapse`).
 fn post_symbolicate(port: u16, stack: Vec<Value>) -> Option<Vec<Value>> {
     let url = format!("http://localhost:{port}/symbolicate");
-    let resp = reqwest::blocking::Client::new().post(&url).json(&json!({ "stack": stack })).send().ok()?;
+    let resp = reqwest::blocking::Client::new()
+        .post(&url)
+        .json(&json!({ "stack": stack }))
+        .send()
+        .ok()?;
     let body: Value = resp.json().ok()?;
     body.get("stack")?.as_array().cloned()
 }
@@ -690,7 +896,11 @@ fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
 /// source locations). Debugger frames carry only a scriptId, so the URL is
 /// resolved from the learned `scripts` map. Falls back to raw bundle positions
 /// per frame when the symbolicator can't map them.
-fn symbolicate_frames(port: u16, frames: &[Value], scripts: &HashMap<String, String>) -> Vec<DapFrame> {
+fn symbolicate_frames(
+    port: u16,
+    frames: &[Value],
+    scripts: &HashMap<String, String>,
+) -> Vec<DapFrame> {
     let frame_url = |f: &Value| -> String {
         let sid = f["location"]["scriptId"].as_str().unwrap_or("");
         scripts
@@ -700,7 +910,13 @@ fn symbolicate_frames(port: u16, frames: &[Value], scripts: &HashMap<String, Str
             .unwrap_or("")
             .to_string()
     };
-    let name_of = |n: &str| if n.is_empty() { "<anonymous>".to_string() } else { n.to_string() };
+    let name_of = |n: &str| {
+        if n.is_empty() {
+            "<anonymous>".to_string()
+        } else {
+            n.to_string()
+        }
+    };
 
     // Per-frame raw fallback (bundle basename + 1-based line/col).
     let raw: Vec<DapFrame> = frames
@@ -750,7 +966,10 @@ fn symbolicate_frames(port: u16, frames: &[Value], scripts: &HashMap<String, Str
 }
 
 /// Read frames until the response with `id` arrives (bounded), returning its `result`.
-fn await_result(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, id: i64) -> Option<Value> {
+fn await_result(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    id: i64,
+) -> Option<Value> {
     for _ in 0..50 {
         match socket.read() {
             Ok(tungstenite::Message::Text(t)) => {
@@ -762,7 +981,9 @@ fn await_result(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTl
                 // Some other event arrived mid-request; keep it for the read loop.
                 BACKLOG.with(|b| b.borrow_mut().push_back(t));
             }
-            Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(tungstenite::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
             _ => return None,
         }
     }
@@ -776,13 +997,24 @@ fn await_result(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTl
 /// seconds per log line. Objects past the budget print as `{…}`.
 const EXPAND_BUDGET: usize = 25;
 
-fn get_object_tree(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, seq: &mut i64, object_id: &str, depth: i32) -> Option<Vec<String>> {
+fn get_object_tree(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    seq: &mut i64,
+    object_id: &str,
+    depth: i32,
+) -> Option<Vec<String>> {
     let mut budget = EXPAND_BUDGET;
     let val = build_value(socket, seq, object_id, depth, &mut budget)?;
     Some(format_js(&val, "").lines().map(String::from).collect())
 }
 
-fn build_value(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, seq: &mut i64, object_id: &str, depth: i32, budget: &mut usize) -> Option<Value> {
+fn build_value(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    seq: &mut i64,
+    object_id: &str,
+    depth: i32,
+    budget: &mut usize,
+) -> Option<Value> {
     if *budget == 0 {
         return None;
     }
@@ -812,15 +1044,26 @@ fn build_value(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTls
             continue;
         }
         let v = &p["value"];
-        let child = if v["type"].as_str() == Some("object") && v.get("objectId").is_some() && depth > 0 {
-            build_value(socket, seq, v["objectId"].as_str().unwrap(), depth - 1, budget).unwrap_or(Value::String("{…}".into()))
-        } else {
-            primitive(v)
-        };
+        let child =
+            if v["type"].as_str() == Some("object") && v.get("objectId").is_some() && depth > 0 {
+                build_value(
+                    socket,
+                    seq,
+                    v["objectId"].as_str().unwrap(),
+                    depth - 1,
+                    budget,
+                )
+                .unwrap_or(Value::String("{…}".into()))
+            } else {
+                primitive(v)
+            };
         map.insert(name, child);
     }
     if is_array && !map.is_empty() {
-        let mut items: Vec<(usize, Value)> = map.into_iter().filter_map(|(k, v)| k.parse::<usize>().ok().map(|i| (i, v))).collect();
+        let mut items: Vec<(usize, Value)> = map
+            .into_iter()
+            .filter_map(|(k, v)| k.parse::<usize>().ok().map(|i| (i, v)))
+            .collect();
         items.sort_by_key(|(i, _)| *i);
         Some(Value::Array(items.into_iter().map(|(_, v)| v).collect()))
     } else {
@@ -851,12 +1094,18 @@ pub fn format_js(value: &Value, indent: &str) -> String {
         Value::String(s) => format!("{s:?}"),
         Value::Array(a) if a.is_empty() => "[]".into(),
         Value::Array(a) => {
-            let items: Vec<String> = a.iter().map(|v| format!("{next}{}", format_js(v, &next))).collect();
+            let items: Vec<String> = a
+                .iter()
+                .map(|v| format!("{next}{}", format_js(v, &next)))
+                .collect();
             format!("[\n{}\n{indent}]", items.join(",\n"))
         }
         Value::Object(o) if o.is_empty() => "{}".into(),
         Value::Object(o) => {
-            let items: Vec<String> = o.iter().map(|(k, v)| format!("{next}{}: {}", k, format_js(v, &next))).collect();
+            let items: Vec<String> = o
+                .iter()
+                .map(|(k, v)| format!("{next}{}: {}", k, format_js(v, &next)))
+                .collect();
             format!("{{\n{}\n{indent}}}", items.join(",\n"))
         }
     }
@@ -887,7 +1136,10 @@ fn preview_to_string(p: &Value) -> String {
             let val = if pr.get("valuePreview").is_some() {
                 preview_to_string(&pr["valuePreview"])
             } else {
-                pr["value"].as_str().map(String::from).unwrap_or_else(|| pr["type"].as_str().unwrap_or("").to_string())
+                pr["value"]
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| pr["type"].as_str().unwrap_or("").to_string())
             };
             if subtype_array {
                 val
@@ -905,7 +1157,11 @@ fn preview_to_string(p: &Value) -> String {
 
 fn headers(v: &Value) -> Vec<(String, String)> {
     v.as_object()
-        .map(|o| o.iter().map(|(k, val)| (k.clone(), val.as_str().unwrap_or("").to_string())).collect())
+        .map(|o| {
+            o.iter()
+                .map(|(k, val)| (k.clone(), val.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 

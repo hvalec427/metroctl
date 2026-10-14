@@ -3,7 +3,10 @@
 //! itself into an arbitrary `Rect` (the full screen for `logs --rn`, a pane in
 //! `signalbox`). Extracted from the old `rntui` so both share one implementation.
 
-use crate::rnclient::{format_js, ConnCmd, FRAMEWORK_FRAME, LogEntry, NetRecord, PausedInfo, RnClient, RnEvent, Status, TargetInfo};
+use crate::rnclient::{
+    format_js, ConnCmd, LogEntry, NetRecord, PausedInfo, RnClient, RnEvent, Status, TargetInfo,
+    FRAMEWORK_FRAME,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
@@ -13,7 +16,9 @@ use std::process::{Command, Stdio};
 const MAX_LINES: usize = 5000;
 const MAX_NET: usize = 1000;
 const PERF_HISTORY: usize = 60;
-const METHODS: [&str; 8] = ["ALL", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+const METHODS: [&str; 8] = [
+    "ALL", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
+];
 
 // ── pure helpers ─────────────────────────────────────────────────────────────
 
@@ -29,7 +34,10 @@ pub fn graphql_operation(rec: &NetRecord) -> Option<String> {
             for kw in ["query", "mutation", "subscription"] {
                 if let Some(idx) = q.find(kw) {
                     let rest = q[idx + kw.len()..].trim_start();
-                    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
                     if !name.is_empty() {
                         return Some(name);
                     }
@@ -41,7 +49,11 @@ pub fn graphql_operation(rec: &NetRecord) -> Option<String> {
     }
     if let Some(arr) = v.as_array() {
         let ops: Vec<String> = arr.iter().filter_map(pick).collect();
-        return if ops.is_empty() { None } else { Some(ops.join(", ")) };
+        return if ops.is_empty() {
+            None
+        } else {
+            Some(ops.join(", "))
+        };
     }
     pick(&v)
 }
@@ -71,7 +83,9 @@ pub fn net_summary(rec: &NetRecord) -> String {
     } else if rec.is_ws {
         "WS".into()
     } else {
-        rec.status.map(|s| s.to_string()).unwrap_or_else(|| "···".into())
+        rec.status
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "···".into())
     };
     let dur = fmt_duration(rec.duration_ms);
     let op = graphql_operation(rec);
@@ -102,7 +116,11 @@ fn sh_quote(s: &str) -> String {
 pub fn to_curl(rec: &NetRecord) -> String {
     let method = rec.method.to_uppercase();
     let head = method == "HEAD";
-    let mut parts = vec![if head { format!("curl -I {}", sh_quote(&rec.url)) } else { format!("curl -X {method} {}", sh_quote(&rec.url)) }];
+    let mut parts = vec![if head {
+        format!("curl -I {}", sh_quote(&rec.url))
+    } else {
+        format!("curl -X {method} {}", sh_quote(&rec.url))
+    }];
     for (k, v) in &rec.req_headers {
         parts.push(format!("-H {}", sh_quote(&format!("{k}: {v}"))));
     }
@@ -125,7 +143,11 @@ fn one_line(s: &str) -> String {
 
 fn pretty_or_raw(body: &str) -> Vec<String> {
     match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| body.to_string()).lines().map(|l| format!("  {l}")).collect(),
+        Ok(v) => serde_json::to_string_pretty(&v)
+            .unwrap_or_else(|_| body.to_string())
+            .lines()
+            .map(|l| format!("  {l}"))
+            .collect(),
         Err(_) => body.lines().map(|l| format!("  {l}")).collect(),
     }
 }
@@ -144,8 +166,16 @@ fn log_detail_lines(e: &LogEntry, show_framework: bool) -> Vec<String> {
     if let Some(stack) = &e.stack {
         out.push(String::new());
         out.push("── Stack ──".into());
-        let hidden = stack.iter().filter(|l| l.starts_with(FRAMEWORK_FRAME)).count();
-        out.extend(stack.iter().filter(|l| show_framework || !l.starts_with(FRAMEWORK_FRAME)).cloned());
+        let hidden = stack
+            .iter()
+            .filter(|l| l.starts_with(FRAMEWORK_FRAME))
+            .count();
+        out.extend(
+            stack
+                .iter()
+                .filter(|l| show_framework || !l.starts_with(FRAMEWORK_FRAME))
+                .cloned(),
+        );
         if hidden > 0 && !show_framework {
             out.push(format!("  ({hidden} framework frames hidden — F to show)"));
         }
@@ -156,7 +186,12 @@ fn log_detail_lines(e: &LogEntry, show_framework: bool) -> Vec<String> {
 fn net_detail_lines(rec: &NetRecord) -> Vec<String> {
     let mut out = Vec::new();
     out.push(format!("{} {}", rec.method, rec.url));
-    let mut status = format!("Status: {}", rec.status.map(|s| s.to_string()).unwrap_or_else(|| "(pending)".into()));
+    let mut status = format!(
+        "Status: {}",
+        rec.status
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "(pending)".into())
+    );
     if let Some(d) = rec.duration_ms {
         status.push_str(&format!("  ·  {}", fmt_duration(Some(d))));
     }
@@ -183,7 +218,11 @@ fn net_detail_lines(rec: &NetRecord) -> Vec<String> {
         for (sent, payload) in &rec.ws_frames {
             let arrow = if *sent { "↑" } else { "↓" };
             for (i, line) in payload.lines().enumerate() {
-                out.push(if i == 0 { format!("  {arrow} {line}") } else { format!("    {line}") });
+                out.push(if i == 0 {
+                    format!("  {arrow} {line}")
+                } else {
+                    format!("    {line}")
+                });
             }
         }
         return out;
@@ -253,7 +292,18 @@ struct Device {
 
 impl Default for Device {
     fn default() -> Self {
-        Device { logs: Vec::new(), net: Vec::new(), status: Status::Connecting, network_supported: true, was_disconnected: false, has_context: false, perf: PerfState::default(), paused: None, log_seq: 0, net_seq: 0 }
+        Device {
+            logs: Vec::new(),
+            net: Vec::new(),
+            status: Status::Connecting,
+            network_supported: true,
+            was_disconnected: false,
+            has_context: false,
+            perf: PerfState::default(),
+            paused: None,
+            log_seq: 0,
+            net_seq: 0,
+        }
     }
 }
 
@@ -302,7 +352,7 @@ pub struct RnView {
     show_framework: bool, // include collapsed React/RN frames in stacks
     method_idx: usize,
     flash: Option<String>,
-    focused: bool, // when embedded: dim the footer unless the logs pane is active
+    focused: bool,  // when embedded: dim the footer unless the logs pane is active
     embedded: bool, // inside the dashboard, whose status bar already lists R/q
     // Vim-style linewise visual selection. The anchor is a list-row index when
     // the list is active, or a wrapped-preview-line index when maximized.
@@ -393,10 +443,16 @@ impl RnView {
     /// contains `name`, else the active one.
     fn query_device(&self, name: Option<&str>) -> Option<(&str, &Device)> {
         let key = match name.map(str::to_lowercase) {
-            Some(n) => self.targets.iter().find(|t| t.key.to_lowercase().contains(&n) || t.label.to_lowercase().contains(&n)).map(|t| t.key.as_str()),
+            Some(n) => self
+                .targets
+                .iter()
+                .find(|t| t.key.to_lowercase().contains(&n) || t.label.to_lowercase().contains(&n))
+                .map(|t| t.key.as_str()),
             None => self.active.as_deref(),
         }?;
-        self.devices.get_key_value(key).map(|(k, d)| (k.as_str(), d))
+        self.devices
+            .get_key_value(key)
+            .map(|(k, d)| (k.as_str(), d))
     }
 
     /// Connected apps, for the control socket's `status`.
@@ -420,7 +476,14 @@ impl RnView {
 
     /// JS console entries from `since` (a seq), newest `limit` that match.
     /// `level`: "error" = errors only, "warn" = warnings and errors.
-    pub fn logs_json(&self, device: Option<&str>, level: Option<&str>, filter: Option<&str>, since: u64, limit: usize) -> serde_json::Value {
+    pub fn logs_json(
+        &self,
+        device: Option<&str>,
+        level: Option<&str>,
+        filter: Option<&str>,
+        since: u64,
+        limit: usize,
+    ) -> serde_json::Value {
         let Some((key, d)) = self.query_device(device) else {
             return serde_json::json!({ "error": "no app connected to Metro" });
         };
@@ -473,7 +536,14 @@ impl RnView {
     }
 
     /// Network requests from `since` (a seq), newest `limit` that match.
-    pub fn net_json(&self, device: Option<&str>, failed_only: bool, filter: Option<&str>, since: u64, limit: usize) -> serde_json::Value {
+    pub fn net_json(
+        &self,
+        device: Option<&str>,
+        failed_only: bool,
+        filter: Option<&str>,
+        since: u64,
+        limit: usize,
+    ) -> serde_json::Value {
         let Some((key, d)) = self.query_device(device) else {
             return serde_json::json!({ "error": "no app connected to Metro" });
         };
@@ -487,7 +557,10 @@ impl RnView {
             .filter(|(seq, r)| {
                 *seq >= since
                     && (!failed_only || net_error(r))
-                    && filter.as_ref().is_none_or(|f| r.url.to_lowercase().contains(f) || graphql_operation(r).is_some_and(|o| o.to_lowercase().contains(f)))
+                    && filter.as_ref().is_none_or(|f| {
+                        r.url.to_lowercase().contains(f)
+                            || graphql_operation(r).is_some_and(|o| o.to_lowercase().contains(f))
+                    })
             })
             .map(|(seq, r)| {
                 serde_json::json!({
@@ -511,7 +584,13 @@ impl RnView {
     pub fn request_text(&self, device: Option<&str>, id: &str) -> Option<String> {
         let (_, d) = self.query_device(device)?;
         let r = d.net.iter().find(|r| r.id == id)?;
-        Some(net_detail_lines(r).iter().map(|l| truncate(l, 20_000)).collect::<Vec<_>>().join("\n"))
+        Some(
+            net_detail_lines(r)
+                .iter()
+                .map(|l| truncate(l, 20_000))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -542,8 +621,15 @@ impl RnView {
                     self.devices.entry(t.key.clone()).or_default();
                 }
                 if self.active.is_none() && !list.is_empty() {
-                    let matched = self.name_filter.as_ref().and_then(|n| list.iter().find(|t| t.key.to_lowercase().contains(n)));
-                    self.active = Some(matched.map(|t| t.key.clone()).unwrap_or_else(|| list[0].key.clone()));
+                    let matched = self
+                        .name_filter
+                        .as_ref()
+                        .and_then(|n| list.iter().find(|t| t.key.to_lowercase().contains(n)));
+                    self.active = Some(
+                        matched
+                            .map(|t| t.key.clone())
+                            .unwrap_or_else(|| list[0].key.clone()),
+                    );
                 }
                 self.targets = list;
             }
@@ -618,7 +704,12 @@ impl RnView {
                         d.perf.history.remove(0);
                     }
                 }
-                d.perf = PerfState { fps: s.fps, heap_used: s.heap_used, heap_total: s.heap_total, history: d.perf.history.clone() };
+                d.perf = PerfState {
+                    fps: s.fps,
+                    heap_used: s.heap_used,
+                    heap_total: s.heap_total,
+                    history: d.perf.history.clone(),
+                };
             }
         }
     }
@@ -635,7 +726,13 @@ impl RnView {
                 .logs
                 .iter()
                 .filter(|e| f.is_empty() || e.text.to_lowercase().contains(&f))
-                .map(|e| (one_line(&e.text), e.level == "error" || e.level == "assert", e.level.clone()))
+                .map(|e| {
+                    (
+                        one_line(&e.text),
+                        e.level == "error" || e.level == "assert",
+                        e.level.clone(),
+                    )
+                })
                 .collect(),
             Tab::Network => {
                 let method = METHODS[self.method_idx];
@@ -655,7 +752,10 @@ impl RnView {
     }
 
     fn detail_wrapped(&self) -> Vec<String> {
-        self.detail_source().iter().flat_map(|l| wrap(l, self.detail_width.max(1))).collect()
+        self.detail_source()
+            .iter()
+            .flat_map(|l| wrap(l, self.detail_width.max(1)))
+            .collect()
     }
 
     fn detail_source(&self) -> Vec<String> {
@@ -670,8 +770,17 @@ impl RnView {
         };
         match self.tab {
             Tab::Logs => {
-                let list: Vec<&LogEntry> = d.logs.iter().filter(|e| self.filter.is_empty() || e.text.to_lowercase().contains(&self.filter.to_lowercase())).collect();
-                list.get(idx).map(|e| log_detail_lines(e, self.show_framework)).unwrap_or_default()
+                let list: Vec<&LogEntry> = d
+                    .logs
+                    .iter()
+                    .filter(|e| {
+                        self.filter.is_empty()
+                            || e.text.to_lowercase().contains(&self.filter.to_lowercase())
+                    })
+                    .collect();
+                list.get(idx)
+                    .map(|e| log_detail_lines(e, self.show_framework))
+                    .unwrap_or_default()
             }
             Tab::Network => {
                 let method = METHODS[self.method_idx];
@@ -679,9 +788,15 @@ impl RnView {
                 let list: Vec<&NetRecord> = d
                     .net
                     .iter()
-                    .filter(|r| (f.is_empty() || net_summary(r).to_lowercase().contains(&f)) && (!self.errors_only || net_error(r)) && (method == "ALL" || r.method.to_uppercase() == method))
+                    .filter(|r| {
+                        (f.is_empty() || net_summary(r).to_lowercase().contains(&f))
+                            && (!self.errors_only || net_error(r))
+                            && (method == "ALL" || r.method.to_uppercase() == method)
+                    })
                     .collect();
-                list.get(idx).map(|r| net_detail_lines(r)).unwrap_or_default()
+                list.get(idx)
+                    .map(|r| net_detail_lines(r))
+                    .unwrap_or_default()
             }
             Tab::Perf => Vec::new(),
         }
@@ -716,7 +831,9 @@ fn pad(s: &str, width: usize) -> String {
 
 /// Background for rows/lines inside a visual selection range.
 fn sel_style() -> Style {
-    Style::default().bg(Color::Rgb(38, 79, 120)).fg(Color::White)
+    Style::default()
+        .bg(Color::Rgb(38, 79, 120))
+        .fg(Color::White)
 }
 
 fn in_range(range: Option<(usize, usize)>, i: usize) -> bool {
@@ -743,7 +860,10 @@ fn row_line(text: &str, width: usize, base: Style, search: &str, current: bool) 
     let lchars: Vec<char> = lower.chars().collect();
     let nchars: Vec<char> = needle.chars().collect();
     while i < bytes.len() {
-        if !nchars.is_empty() && i + nchars.len() <= lchars.len() && lchars[i..i + nchars.len()] == nchars[..] {
+        if !nchars.is_empty()
+            && i + nchars.len() <= lchars.len()
+            && lchars[i..i + nchars.len()] == nchars[..]
+        {
             let m: String = bytes[i..i + nchars.len()].iter().collect();
             spans.push(Span::styled(m, hl));
             i += nchars.len();
@@ -751,7 +871,11 @@ fn row_line(text: &str, width: usize, base: Style, search: &str, current: bool) 
             // accumulate a run of non-match
             let start = i;
             i += 1;
-            while i < bytes.len() && !(i + nchars.len() <= lchars.len() && !nchars.is_empty() && lchars[i..i + nchars.len()] == nchars[..]) {
+            while i < bytes.len()
+                && !(i + nchars.len() <= lchars.len()
+                    && !nchars.is_empty()
+                    && lchars[i..i + nchars.len()] == nchars[..])
+            {
                 i += 1;
             }
             let run: String = bytes[start..i].iter().collect();
@@ -765,31 +889,62 @@ fn perf_lines(view: &RnView, h: usize) -> Vec<Line<'static>> {
     let d = view.active.as_ref().and_then(|k| view.devices.get(k));
     let mut out: Vec<Line> = vec![Line::raw(""), Line::raw("  JS thread")];
     match d.and_then(|d| d.perf.fps) {
-        None => out.push(Line::styled("    FPS  — (measuring…)", Style::default().fg(Color::DarkGray))),
+        None => out.push(Line::styled(
+            "    FPS  — (measuring…)",
+            Style::default().fg(Color::DarkGray),
+        )),
         Some(fps) => {
             let width = 30usize;
             let filled = ((fps.min(60) as f64 / 60.0) * width as f64).round() as usize;
-            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(width.saturating_sub(filled)));
-            let color = if fps >= 50 { Color::Green } else if fps >= 30 { Color::Yellow } else { Color::Red };
-            out.push(Line::styled(format!("    FPS  {fps:>2} / 60   {bar}"), Style::default().fg(color)));
+            let bar = format!(
+                "{}{}",
+                "█".repeat(filled),
+                "░".repeat(width.saturating_sub(filled))
+            );
+            let color = if fps >= 50 {
+                Color::Green
+            } else if fps >= 30 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            out.push(Line::styled(
+                format!("    FPS  {fps:>2} / 60   {bar}"),
+                Style::default().fg(color),
+            ));
         }
     }
     if let Some(d) = d {
         if !d.perf.history.is_empty() {
             let spark = "▁▂▃▄▅▆▇█";
             let chars: Vec<char> = spark.chars().collect();
-            let s: String = d.perf.history.iter().map(|v| chars[((*v as f64 / 60.0) * 7.0).round().clamp(0.0, 7.0) as usize]).collect();
-            out.push(Line::raw(format!("    last {}s  {s}", d.perf.history.len())));
+            let s: String = d
+                .perf
+                .history
+                .iter()
+                .map(|v| chars[((*v as f64 / 60.0) * 7.0).round().clamp(0.0, 7.0) as usize])
+                .collect();
+            out.push(Line::raw(format!(
+                "    last {}s  {s}",
+                d.perf.history.len()
+            )));
         }
         out.push(Line::raw(""));
         out.push(Line::raw("  Memory (JS heap)"));
         match d.perf.heap_used {
             Some(u) => {
                 let used = format!("{:.1} MB", u as f64 / 1048576.0);
-                let total = d.perf.heap_total.map(|t| format!(" / {:.1} MB", t as f64 / 1048576.0)).unwrap_or_default();
+                let total = d
+                    .perf
+                    .heap_total
+                    .map(|t| format!(" / {:.1} MB", t as f64 / 1048576.0))
+                    .unwrap_or_default();
                 out.push(Line::raw(format!("    used {used}{total}")));
             }
-            None => out.push(Line::styled("    not reported by this runtime", Style::default().fg(Color::DarkGray))),
+            None => out.push(Line::styled(
+                "    not reported by this runtime",
+                Style::default().fg(Color::DarkGray),
+            )),
         }
     }
     out.push(Line::raw(""));
@@ -812,7 +967,11 @@ fn render_view(view: &mut RnView, frame: &mut Frame, area: Rect) {
     let is_logs = view.tab == Tab::Logs;
     // Record the pane geometry so n/N wrap/scroll match what's drawn.
     view.view_h = h;
-    view.detail_width = if view.maximized { cols } else { cols.saturating_sub(((cols as f64) * 0.45) as usize + 1) };
+    view.detail_width = if view.maximized {
+        cols
+    } else {
+        cols.saturating_sub(((cols as f64) * 0.45) as usize + 1)
+    };
 
     let d = view.active.as_ref().and_then(|k| view.devices.get(k));
     let who = view.active.clone().unwrap_or_else(|| "…".into());
@@ -825,10 +984,25 @@ fn render_view(view: &mut RnView, frame: &mut Frame, area: Rect) {
     let logs_n = d.map(|d| d.logs.len()).unwrap_or(0);
     let net_n = d.map(|d| d.net.len()).unwrap_or(0);
     let tabbar = {
-        let lbl = |t: Tab, s: String| if view.tab == t { format!("[{s}]") } else { format!(" {s} ") };
-        format!("{} {} {}", lbl(Tab::Logs, format!("Logs ({logs_n})")), lbl(Tab::Network, format!("Network ({net_n})")), lbl(Tab::Perf, "Perf".into()))
+        let lbl = |t: Tab, s: String| {
+            if view.tab == t {
+                format!("[{s}]")
+            } else {
+                format!(" {s} ")
+            }
+        };
+        format!(
+            "{} {} {}",
+            lbl(Tab::Logs, format!("Logs ({logs_n})")),
+            lbl(Tab::Network, format!("Network ({net_n})")),
+            lbl(Tab::Perf, "Perf".into())
+        )
     };
-    let restart = if view.clear_on_restart { "clears logs on reload" } else { "keeps logs on reload" };
+    let restart = if view.clear_on_restart {
+        "clears logs on reload"
+    } else {
+        "keeps logs on reload"
+    };
     let mut net_filters = String::new();
     if !is_logs && (view.errors_only || view.method_idx != 0) {
         let mut parts = Vec::new();
@@ -840,32 +1014,69 @@ fn render_view(view: &mut RnView, frame: &mut Frame, area: Rect) {
         }
         net_filters = format!(" · {}", parts.join("+"));
     }
-    let filter_str = if view.filter.is_empty() { String::new() } else { format!(" · filter:\"{}\"", view.filter) };
+    let filter_str = if view.filter.is_empty() {
+        String::new()
+    } else {
+        format!(" · filter:\"{}\"", view.filter)
+    };
     // App/device engine metadata for the active target (e.g. "Hermes").
-    let meta = view.targets.iter().find(|t| Some(&t.key) == view.active.as_ref()).and_then(|t| t.meta.clone());
+    let meta = view
+        .targets
+        .iter()
+        .find(|t| Some(&t.key) == view.active.as_ref())
+        .and_then(|t| t.meta.clone());
     let meta_str = meta.map(|m| format!(" · {m}")).unwrap_or_default();
     // While paused at a breakpoint the top bar becomes the debugger banner;
     // otherwise it's the normal status/tab line.
     let paused = d.and_then(|d| d.paused.as_ref());
     let head = match paused {
-        Some(p) => format!(" ⏸ PAUSED {}:{} — F5 continue · F10 over · F11 into · ⇧F11 out · F6 pause", p.file, p.line),
+        Some(p) => format!(
+            " ⏸ PAUSED {}:{} — F5 continue · F10 over · F11 into · ⇧F11 out · F6 pause",
+            p.file, p.line
+        ),
         // Autoscroll state (space toggles it, like every scrollable list).
-        None => format!(" {who} · {status}{meta_str}{filter_str}{net_filters} · {restart}{}   {tabbar}", if view.follow { "" } else { " · paused" }),
+        None => format!(
+            " {who} · {status}{meta_str}{filter_str}{net_filters} · {restart}{}   {tabbar}",
+            if view.follow { "" } else { " · paused" }
+        ),
     };
     let head_style = if paused.is_some() {
-        Style::default().bg(Color::Rgb(191, 97, 106)).fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(Color::Rgb(191, 97, 106))
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     } else {
         bar_style()
     };
 
     // Blank the key footer when another pane has focus (embedded in the dashboard).
-    let foot = if view.focused { footer(view, is_logs) } else { String::new() };
-    let foot_style = if view.focused { bar_style() } else { Style::default() };
+    let foot = if view.focused {
+        footer(view, is_logs)
+    } else {
+        String::new()
+    };
+    let foot_style = if view.focused {
+        bar_style()
+    } else {
+        Style::default()
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::styled(pad(&head, cols), head_style));
     if has_bar {
-        let db = format!(" Devices: {}", view.targets.iter().enumerate().map(|(i, t)| if Some(&t.key) == view.active.as_ref() { format!("[{}:{}]", i + 1, t.label) } else { format!(" {}:{} ", i + 1, t.label) }).collect::<Vec<_>>().join(" "));
+        let db = format!(
+            " Devices: {}",
+            view.targets
+                .iter()
+                .enumerate()
+                .map(|(i, t)| if Some(&t.key) == view.active.as_ref() {
+                    format!("[{}:{}]", i + 1, t.label)
+                } else {
+                    format!(" {}:{} ", i + 1, t.label)
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         lines.push(Line::styled(pad(&db, cols), bar_style()));
     }
 
@@ -886,17 +1097,31 @@ fn render_body(view: &RnView, cols: usize, h: usize, d: Option<&Device>) -> Vec<
     }
     let rows = view.rows();
     let len = rows.len();
-    if view.tab == Tab::Network && d.map(|d| !d.network_supported && d.net.is_empty()).unwrap_or(false) {
-        let mut out = vec![Line::styled(" Network isn’t exposed over CDP by this React Native version.", Style::default().fg(Color::Yellow))];
+    if view.tab == Tab::Network
+        && d.map(|d| !d.network_supported && d.net.is_empty())
+            .unwrap_or(false)
+    {
+        let mut out = vec![Line::styled(
+            " Network isn’t exposed over CDP by this React Native version.",
+            Style::default().fg(Color::Yellow),
+        )];
         while out.len() < h {
             out.push(Line::raw(""));
         }
         return out;
     }
-    let eff_sel = if view.follow { len.saturating_sub(1) } else { view.sel[view.tab_idx()].min(len.saturating_sub(1)) };
+    let eff_sel = if view.follow {
+        len.saturating_sub(1)
+    } else {
+        view.sel[view.tab_idx()].min(len.saturating_sub(1))
+    };
     // Visual-select range over list rows — only when the list is the active
     // cursor (no detail panel). With a panel open, visual targets the panel.
-    let list_vis = if view.detail { None } else { view.visual.map(|a| (a.min(eff_sel), a.max(eff_sel))) };
+    let list_vis = if view.detail {
+        None
+    } else {
+        view.visual.map(|a| (a.min(eff_sel), a.max(eff_sel)))
+    };
 
     if view.detail && len > 0 {
         let dl = view.detail_wrapped();
@@ -960,7 +1185,13 @@ fn render_body(view: &RnView, cols: usize, h: usize, d: Option<&Device>) -> Vec<
                     Style::default()
                 };
                 let dline = dl.get(abs).cloned().unwrap_or_default();
-                let dl_line = row_line(&dline, right_w, dstyle, &view.search, Some(abs) == view.detail_hit);
+                let dl_line = row_line(
+                    &dline,
+                    right_w,
+                    dstyle,
+                    &view.search,
+                    Some(abs) == view.detail_hit,
+                );
                 spans.extend(dl_line.spans);
                 Line::from(spans)
             })
@@ -968,7 +1199,11 @@ fn render_body(view: &RnView, cols: usize, h: usize, d: Option<&Device>) -> Vec<
     }
 
     // full list
-    let start = if view.follow { len.saturating_sub(h) } else { eff_sel.saturating_sub(h / 2).min(len.saturating_sub(h)) };
+    let start = if view.follow {
+        len.saturating_sub(h)
+    } else {
+        eff_sel.saturating_sub(h / 2).min(len.saturating_sub(h))
+    };
     (0..h)
         .map(|i| {
             let idx = start + i;
@@ -998,9 +1233,17 @@ fn footer(view: &RnView, is_logs: bool) -> String {
         Mode::Filter => format!("filter: {}▏", view.input),
         Mode::Normal => {
             // Standalone only: the dashboard shows R/q as global keys.
-            let (reload, quit) = if view.embedded { ("", "") } else { (" · R reload", " · q quit") };
+            let (reload, quit) = if view.embedded {
+                ("", "")
+            } else {
+                (" · R reload", " · q quit")
+            };
             // Device switching only matters with more than one connected.
-            let devs = if view.targets.len() > 1 { " 1-9 devices ·" } else { "" };
+            let devs = if view.targets.len() > 1 {
+                " 1-9 devices ·"
+            } else {
+                ""
+            };
             if let Some(f) = &view.flash {
                 return format!(" {f}");
             }
@@ -1012,14 +1255,34 @@ fn footer(view: &RnView, is_logs: bool) -> String {
                 return format!("{devs} live JS FPS + heap{reload}{quit}");
             }
             if view.detail {
-                let nn = if view.search.is_empty() { "" } else { " · n/N" };
+                let nn = if view.search.is_empty() {
+                    ""
+                } else {
+                    " · n/N"
+                };
                 let z = if view.maximized { "z split" } else { "z max" };
-                let copy = if is_logs { " · F frames" } else { " · c curl" };
+                let copy = if is_logs {
+                    " · F frames"
+                } else {
+                    " · c curl"
+                };
                 return format!(" ⏎ close · {z} · {{}} sect · / search{nn} · V select · y copy{copy} · o nvim{quit}");
             }
-            let nn = if view.search.is_empty() { "" } else { " · n/N" };
-            let netf = if is_logs { "" } else { " · e errors · m method" };
-            let restart = if view.clear_on_restart { "clear" } else { "keep" };
+            let nn = if view.search.is_empty() {
+                ""
+            } else {
+                " · n/N"
+            };
+            let netf = if is_logs {
+                ""
+            } else {
+                " · e errors · m method"
+            };
+            let restart = if view.clear_on_restart {
+                "clear"
+            } else {
+                "keep"
+            };
             format!("{devs} / search{nn} · f filter · ⏎ preview · z max · V select · y copy{netf} · c clear · p reload:{restart}{reload}{quit}")
         }
     }
@@ -1029,7 +1292,12 @@ fn footer(view: &RnView, is_logs: bool) -> String {
 
 fn match_indexes(view: &RnView) -> Vec<usize> {
     let n = view.search.to_lowercase();
-    view.rows().iter().enumerate().filter(|(_, (t, _, _))| t.to_lowercase().contains(&n)).map(|(i, _)| i).collect()
+    view.rows()
+        .iter()
+        .enumerate()
+        .filter(|(_, (t, _, _))| t.to_lowercase().contains(&n))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 fn jump(view: &mut RnView, dir: i32) {
@@ -1041,8 +1309,20 @@ fn jump(view: &mut RnView, dir: i32) {
         return;
     }
     let n = view.rows().len();
-    let base = if view.follow { n.saturating_sub(1) } else { view.sel[view.tab_idx()] };
-    let next = if dir == 1 { hits.iter().find(|&&i| i > base).copied().unwrap_or(hits[0]) } else { hits.iter().rev().find(|&&i| i < base).copied().unwrap_or(*hits.last().unwrap()) };
+    let base = if view.follow {
+        n.saturating_sub(1)
+    } else {
+        view.sel[view.tab_idx()]
+    };
+    let next = if dir == 1 {
+        hits.iter().find(|&&i| i > base).copied().unwrap_or(hits[0])
+    } else {
+        hits.iter()
+            .rev()
+            .find(|&&i| i < base)
+            .copied()
+            .unwrap_or(*hits.last().unwrap())
+    };
     view.follow = false;
     view.sel[view.tab_idx()] = next;
 }
@@ -1059,9 +1339,17 @@ fn jump_first(view: &mut RnView) {
     if hits.is_empty() {
         return;
     }
-    let base = if view.follow { 0 } else { view.sel[view.tab_idx()] };
+    let base = if view.follow {
+        0
+    } else {
+        view.sel[view.tab_idx()]
+    };
     view.follow = false;
-    view.sel[view.tab_idx()] = hits.iter().find(|&&i| i >= base).copied().unwrap_or(hits[0]);
+    view.sel[view.tab_idx()] = hits
+        .iter()
+        .find(|&&i| i >= base)
+        .copied()
+        .unwrap_or(hits[0]);
 }
 
 const DETAIL_CONTEXT: usize = 3;
@@ -1071,7 +1359,12 @@ fn detail_matches(view: &RnView) -> Vec<usize> {
         return Vec::new();
     }
     let n = view.search.to_lowercase();
-    view.detail_wrapped().iter().enumerate().filter(|(_, l)| l.to_lowercase().contains(&n)).map(|(i, _)| i).collect()
+    view.detail_wrapped()
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.to_lowercase().contains(&n))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 fn detail_jump(view: &mut RnView, dir: i32) {
@@ -1083,7 +1376,11 @@ fn detail_jump(view: &mut RnView, dir: i32) {
     let next = if dir == 1 {
         hits.iter().find(|&&i| i > base).copied().unwrap_or(hits[0])
     } else {
-        hits.iter().rev().find(|&&i| i < base).copied().unwrap_or(*hits.last().unwrap())
+        hits.iter()
+            .rev()
+            .find(|&&i| i < base)
+            .copied()
+            .unwrap_or(*hits.last().unwrap())
     };
     view.detail_hit = Some(next);
     view.detail_scroll = next.saturating_sub(DETAIL_CONTEXT);
@@ -1095,7 +1392,11 @@ fn detail_jump_first(view: &mut RnView) {
         return;
     }
     let from = view.detail_hit.unwrap_or(view.detail_scroll);
-    let next = hits.iter().find(|&&i| i >= from).copied().unwrap_or(hits[0]);
+    let next = hits
+        .iter()
+        .find(|&&i| i >= from)
+        .copied()
+        .unwrap_or(hits[0]);
     view.detail_hit = Some(next);
     view.detail_scroll = next.saturating_sub(DETAIL_CONTEXT);
 }
@@ -1106,7 +1407,11 @@ fn copy_selection(view: &mut RnView) {
         return;
     }
     let text = lines.join("\n");
-    view.flash = Some(if copy_to_clipboard(&text) { format!("copied ({} chars)", text.len()) } else { "copy failed".into() });
+    view.flash = Some(if copy_to_clipboard(&text) {
+        format!("copied ({} chars)", text.len())
+    } else {
+        "copy failed".into()
+    });
 }
 
 /// Copy `text` to the clipboard, flashing how many lines were yanked.
@@ -1115,7 +1420,11 @@ fn yank(view: &mut RnView, text: String) {
         return;
     }
     let n = text.lines().count();
-    view.flash = Some(if copy_to_clipboard(&text) { format!("yanked {n} line{}", if n == 1 { "" } else { "s" }) } else { "copy failed".into() });
+    view.flash = Some(if copy_to_clipboard(&text) {
+        format!("yanked {n} line{}", if n == 1 { "" } else { "s" })
+    } else {
+        "copy failed".into()
+    });
 }
 
 /// Scroll the maximized preview so `detail_cursor` stays on screen.
@@ -1135,10 +1444,22 @@ fn jump_section(view: &mut RnView, dir: i32) {
     let is_header = |s: &str| s.trim_start().starts_with("──");
     let cur = view.detail_cursor;
     let target = if dir > 0 {
-        lines.iter().enumerate().skip(cur + 1).find(|(_, l)| is_header(l)).map(|(i, _)| i)
+        lines
+            .iter()
+            .enumerate()
+            .skip(cur + 1)
+            .find(|(_, l)| is_header(l))
+            .map(|(i, _)| i)
     } else {
         // Previous header, or the top of the panel if there's none above.
-        lines.iter().enumerate().take(cur).filter(|(_, l)| is_header(l)).last().map(|(i, _)| i).or(Some(0))
+        lines
+            .iter()
+            .enumerate()
+            .take(cur)
+            .filter(|(_, l)| is_header(l))
+            .last()
+            .map(|(i, _)| i)
+            .or(Some(0))
     };
     if let Some(i) = target {
         view.detail_cursor = i;
@@ -1177,7 +1498,10 @@ fn yank_visual(view: &mut RnView) -> bool {
         let len = view.rows().len();
         let eff = view.eff_sel(len);
         let (lo, hi) = (anchor.min(eff), anchor.max(eff).min(len.saturating_sub(1)));
-        (lo..=hi).map(|i| view.row_detail(i).join("\n")).collect::<Vec<_>>().join("\n\n")
+        (lo..=hi)
+            .map(|i| view.row_detail(i).join("\n"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
     };
     yank(view, text);
     view.visual = None;
@@ -1194,11 +1518,23 @@ fn copy_curl(view: &mut RnView) {
     };
     let method = METHODS[view.method_idx];
     let f = view.filter.to_lowercase();
-    let list: Vec<&NetRecord> = d.net.iter().filter(|r| (f.is_empty() || net_summary(r).to_lowercase().contains(&f)) && (!view.errors_only || net_error(r)) && (method == "ALL" || r.method.to_uppercase() == method)).collect();
+    let list: Vec<&NetRecord> = d
+        .net
+        .iter()
+        .filter(|r| {
+            (f.is_empty() || net_summary(r).to_lowercase().contains(&f))
+                && (!view.errors_only || net_error(r))
+                && (method == "ALL" || r.method.to_uppercase() == method)
+        })
+        .collect();
     let sel = view.sel[view.tab_idx()].min(list.len().saturating_sub(1));
     if let Some(rec) = list.get(sel) {
         let curl = to_curl(rec);
-        view.flash = Some(if copy_to_clipboard(&curl) { "copied curl".into() } else { "copy failed".into() });
+        view.flash = Some(if copy_to_clipboard(&curl) {
+            "copied curl".into()
+        } else {
+            "copy failed".into()
+        });
     }
 }
 
@@ -1206,7 +1542,12 @@ fn copy_curl(view: &mut RnView) {
 /// (so continue/step keys are inert when nothing is paused).
 fn send_if_paused(view: &RnView, client: &RnClient, key: &Option<String>, cmd: ConnCmd) {
     if let Some(k) = key {
-        if view.devices.get(k).map(|d| d.paused.is_some()).unwrap_or(false) {
+        if view
+            .devices
+            .get(k)
+            .map(|d| d.paused.is_some())
+            .unwrap_or(false)
+        {
             client.send(k, cmd);
         }
     }
@@ -1300,7 +1641,8 @@ fn open_in_nvim(path: &str, line: usize) -> Result<(), String> {
         run(&["select-pane", "-t", &pane]);
         return Ok(());
     }
-    let sock = nvim_socket().ok_or("no running nvim found (start it with --listen, or set NVIM_LISTEN_ADDRESS)")?;
+    let sock = nvim_socket()
+        .ok_or("no running nvim found (start it with --listen, or set NVIM_LISTEN_ADDRESS)")?;
     let keys = format!("<C-\\><C-n>:e +{line} {path}<CR>");
     let ok = Command::new("nvim")
         .args(["--server", &sock, "--remote-send", &keys])
@@ -1316,7 +1658,15 @@ fn open_in_nvim(path: &str, line: usize) -> Result<(), String> {
 
 /// The pane id of an nvim in the current tmux session, if any.
 fn tmux_nvim_pane() -> Option<String> {
-    let out = Command::new("tmux").args(["list-panes", "-s", "-F", "#{pane_id} #{pane_current_command}"]).output().ok()?;
+    let out = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-s",
+            "-F",
+            "#{pane_id} #{pane_current_command}",
+        ])
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     for l in text.lines() {
         let mut parts = l.split_whitespace();
@@ -1425,7 +1775,9 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
         // Debugger stepping (only act while the VM is suspended).
         KeyCode::F(5) => send_if_paused(view, client, &key_active, ConnCmd::Continue),
         KeyCode::F(10) => send_if_paused(view, client, &key_active, ConnCmd::StepOver),
-        KeyCode::F(11) if key.modifiers.contains(KeyModifiers::SHIFT) => send_if_paused(view, client, &key_active, ConnCmd::StepOut),
+        KeyCode::F(11) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            send_if_paused(view, client, &key_active, ConnCmd::StepOut)
+        }
         KeyCode::F(11) => send_if_paused(view, client, &key_active, ConnCmd::StepInto),
         // Interrupt a running VM (works whether or not already paused).
         KeyCode::F(6) => {
@@ -1434,13 +1786,21 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             }
         }
         KeyCode::Char('[') => {
-            view.tab = match view.tab { Tab::Logs => Tab::Perf, Tab::Network => Tab::Logs, Tab::Perf => Tab::Network };
+            view.tab = match view.tab {
+                Tab::Logs => Tab::Perf,
+                Tab::Network => Tab::Logs,
+                Tab::Perf => Tab::Network,
+            };
             view.detail = false;
             view.maximized = false;
             view.visual = None;
         }
         KeyCode::Char(']') => {
-            view.tab = match view.tab { Tab::Logs => Tab::Network, Tab::Network => Tab::Perf, Tab::Perf => Tab::Logs };
+            view.tab = match view.tab {
+                Tab::Logs => Tab::Network,
+                Tab::Network => Tab::Perf,
+                Tab::Perf => Tab::Logs,
+            };
             view.detail = false;
             view.maximized = false;
             view.visual = None;
@@ -1496,9 +1856,18 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
         KeyCode::Char('{') if view.detail => jump_section(view, -1),
         KeyCode::Char('F') if view.detail && view.tab == Tab::Logs => {
             view.show_framework = !view.show_framework;
-            view.detail_cursor = view.detail_cursor.min(view.detail_wrapped().len().saturating_sub(1));
+            view.detail_cursor = view
+                .detail_cursor
+                .min(view.detail_wrapped().len().saturating_sub(1));
             keep_cursor_visible(view);
-            view.flash = Some(if view.show_framework { "showing framework frames" } else { "hiding framework frames" }.into());
+            view.flash = Some(
+                if view.show_framework {
+                    "showing framework frames"
+                } else {
+                    "hiding framework frames"
+                }
+                .into(),
+            );
         }
         KeyCode::Char('V') => {
             if view.visual.is_some() {
@@ -1517,7 +1886,9 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
         }
         KeyCode::Char('C') => copy_curl(view),
         KeyCode::Char('e') if view.tab == Tab::Network => view.errors_only = !view.errors_only,
-        KeyCode::Char('m') if view.tab == Tab::Network => view.method_idx = (view.method_idx + 1) % METHODS.len(),
+        KeyCode::Char('m') if view.tab == Tab::Network => {
+            view.method_idx = (view.method_idx + 1) % METHODS.len()
+        }
         KeyCode::Char('a') | KeyCode::Char(' ') => {
             view.visual = None;
             view.follow = !view.follow;
@@ -1590,7 +1961,11 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             } else {
                 // Start from the row actually shown (the bottom while following),
                 // not the stale sel=0, so the first `k` steps up by one.
-                let cur = if view.follow { n.saturating_sub(1) } else { view.sel[ti] };
+                let cur = if view.follow {
+                    n.saturating_sub(1)
+                } else {
+                    view.sel[ti]
+                };
                 view.follow = false;
                 view.sel[ti] = cur.saturating_sub(1);
                 reset_detail_cursor(view); // new entry previewed → panel back to top
@@ -1603,7 +1978,11 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
                 keep_cursor_visible(view);
                 view.detail_hit = None;
             } else {
-                let cur = if view.follow { n.saturating_sub(1) } else { view.sel[ti] };
+                let cur = if view.follow {
+                    n.saturating_sub(1)
+                } else {
+                    view.sel[ti]
+                };
                 let next = (cur + 1).min(n.saturating_sub(1));
                 view.follow = next >= n.saturating_sub(1);
                 view.sel[ti] = next;
@@ -1611,12 +1990,20 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             }
         }
         KeyCode::PageUp => {
-            let cur = if view.follow { n.saturating_sub(1) } else { view.sel[ti] };
+            let cur = if view.follow {
+                n.saturating_sub(1)
+            } else {
+                view.sel[ti]
+            };
             view.follow = false;
             view.sel[ti] = cur.saturating_sub(h);
         }
         KeyCode::PageDown => {
-            let cur = if view.follow { n.saturating_sub(1) } else { view.sel[ti] };
+            let cur = if view.follow {
+                n.saturating_sub(1)
+            } else {
+                view.sel[ti]
+            };
             let next = (cur + h).min(n.saturating_sub(1));
             view.follow = next >= n.saturating_sub(1);
             view.sel[ti] = next;

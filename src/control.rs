@@ -29,7 +29,8 @@ pub fn socket_path() -> PathBuf {
 /// Listen on `path`, forwarding each request to `tx`.
 pub fn serve(path: &Path, tx: Sender<Request>) -> Result<()> {
     let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let tx = tx.clone();
@@ -55,10 +56,18 @@ fn handle(stream: UnixStream, tx: Sender<Request>) {
                 let (rtx, rrx) = channel();
                 let cmd = req["cmd"].as_str().unwrap_or("").to_string();
                 let args = req.get("args").cloned().unwrap_or(json!({}));
-                if tx.send(Request { cmd, args, reply: rtx }).is_err() {
+                if tx
+                    .send(Request {
+                        cmd,
+                        args,
+                        reply: rtx,
+                    })
+                    .is_err()
+                {
                     return; // dashboard gone
                 }
-                rrx.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| json!({ "error": "dashboard didn't answer" }))
+                rrx.recv_timeout(Duration::from_secs(30))
+                    .unwrap_or_else(|_| json!({ "error": "dashboard didn't answer" }))
             }
             Err(e) => json!({ "error": format!("bad request: {e}") }),
         };
@@ -70,7 +79,8 @@ fn handle(stream: UnixStream, tx: Sender<Request>) {
 
 /// Send one request to the dashboard at `path` and wait for its reply.
 pub fn call(path: &Path, cmd: &str, args: Value) -> Result<Value> {
-    let mut s = UnixStream::connect(path).with_context(|| format!("connecting to signalbox at {}", path.display()))?;
+    let mut s = UnixStream::connect(path)
+        .with_context(|| format!("connecting to signalbox at {}", path.display()))?;
     s.set_read_timeout(Some(Duration::from_secs(40)))?;
     writeln!(s, "{}", json!({ "cmd": cmd, "args": args }))?;
     let mut line = String::new();
@@ -86,13 +96,23 @@ pub fn find_session(dir: &Path) -> Result<(PathBuf, crate::session::SessionFile)
     for d in dir.ancestors() {
         if let Some(s) = crate::session::read_session(d) {
             if !crate::session::pid_alive(s.pid) {
-                return Err(anyhow!("the signalbox session in {} isn't running (stale session.json)", d.display()));
+                return Err(anyhow!(
+                    "the signalbox session in {} isn't running (stale session.json)",
+                    d.display()
+                ));
             }
-            let sock = s.socket.clone().ok_or_else(|| anyhow!("the signalbox session in {} has no control socket", d.display()))?;
+            let sock = s.socket.clone().ok_or_else(|| {
+                anyhow!(
+                    "the signalbox session in {} has no control socket",
+                    d.display()
+                )
+            })?;
             return Ok((PathBuf::from(sock), s));
         }
     }
-    Err(anyhow!("no running signalbox session here — start one with `signalbox` or `signalbox up`"))
+    Err(anyhow!(
+        "no running signalbox session here — start one with `signalbox` or `signalbox up`"
+    ))
 }
 
 /// `signalbox ctl <cmd> [json args]`: one request to this checkout's session.

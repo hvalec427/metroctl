@@ -26,10 +26,15 @@ type Seq = Arc<Mutex<i64>>;
 /// usually another signalbox (or anything else) already holding the port, in
 /// which case editors would attach to *that* one.
 pub fn bind() -> Result<TcpListener, String> {
-    let port: u16 = crate::rnconfig::env("DAP_PORT").and_then(|s| s.parse().ok()).unwrap_or(9223);
+    let port: u16 = crate::rnconfig::env("DAP_PORT")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9223);
     TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
-            format!("debugger off: :{port} is taken by {} (set SIGNALBOX_DAP_PORT to use another)", crate::metro_events::describe_listener(port))
+            format!(
+                "debugger off: :{port} is taken by {} (set SIGNALBOX_DAP_PORT to use another)",
+                crate::metro_events::describe_listener(port)
+            )
         } else {
             format!("debugger off: can't listen on :{port}: {e}")
         }
@@ -47,7 +52,12 @@ pub fn serve(listener: TcpListener, senders: Senders, debug_sink: DebugSink, bun
     }
 }
 
-fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: UrlSlot) -> std::io::Result<()> {
+fn session(
+    stream: TcpStream,
+    senders: Senders,
+    debug_sink: DebugSink,
+    bundle: UrlSlot,
+) -> std::io::Result<()> {
     let writer: Writer = Arc::new(Mutex::new(stream.try_clone()?));
     let seq: Seq = Arc::new(Mutex::new(1));
     let frames: Arc<Mutex<Vec<super::DapFrame>>> = Arc::new(Mutex::new(Vec::new()));
@@ -72,16 +82,22 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
         let req_seq = msg["seq"].as_i64().unwrap_or(0);
         match command.as_str() {
             "initialize" => {
-                respond(&writer, &seq, req_seq, &command, json!({
-                    "supportsConfigurationDoneRequest": true,
-                    "supportsTerminateRequest": true,
-                    "supportsConditionalBreakpoints": true,
-                    "supportsEvaluateForHovers": true,
-                    "exceptionBreakpointFilters": [
-                        { "filter": "all", "label": "All Exceptions" },
-                        { "filter": "uncaught", "label": "Uncaught Exceptions", "default": true },
-                    ],
-                }));
+                respond(
+                    &writer,
+                    &seq,
+                    req_seq,
+                    &command,
+                    json!({
+                        "supportsConfigurationDoneRequest": true,
+                        "supportsTerminateRequest": true,
+                        "supportsConditionalBreakpoints": true,
+                        "supportsEvaluateForHovers": true,
+                        "exceptionBreakpointFilters": [
+                            { "filter": "all", "label": "All Exceptions" },
+                            { "filter": "uncaught", "label": "Uncaught Exceptions", "default": true },
+                        ],
+                    }),
+                );
                 event(&writer, &seq, "initialized", json!({}));
             }
             "attach" | "launch" => {
@@ -101,22 +117,41 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                     std::thread::spawn(move || {
                         for ev in rx {
                             match ev {
-                                DebugEvent::Paused { frames: f, reason, raw_frames } => {
+                                DebugEvent::Paused {
+                                    frames: f,
+                                    reason,
+                                    raw_frames,
+                                } => {
                                     *fr.lock().unwrap() = f;
                                     *rawc.lock().unwrap() = raw_frames;
                                     refs.lock().unwrap().clear(); // objectIds are per-pause
-                                    event(&w, &sq, "stopped", json!({
-                                        "reason": map_reason(&reason),
-                                        "threadId": 1,
-                                        "allThreadsStopped": true,
-                                    }));
+                                    event(
+                                        &w,
+                                        &sq,
+                                        "stopped",
+                                        json!({
+                                            "reason": map_reason(&reason),
+                                            "threadId": 1,
+                                            "allThreadsStopped": true,
+                                        }),
+                                    );
                                 }
                                 DebugEvent::Resumed => {
                                     refs.lock().unwrap().clear();
-                                    event(&w, &sq, "continued", json!({"threadId": 1, "allThreadsContinued": true}));
+                                    event(
+                                        &w,
+                                        &sq,
+                                        "continued",
+                                        json!({"threadId": 1, "allThreadsContinued": true}),
+                                    );
                                 }
                                 DebugEvent::Output { category, output } => {
-                                    event(&w, &sq, "output", json!({ "category": category, "output": output }));
+                                    event(
+                                        &w,
+                                        &sq,
+                                        "output",
+                                        json!({ "category": category, "output": output }),
+                                    );
                                 }
                             }
                         }
@@ -125,15 +160,25 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
             }
             "configurationDone" => respond(&writer, &seq, req_seq, &command, json!({})),
             "setBreakpoints" => {
-                let src_path = msg["arguments"]["source"]["path"].as_str().unwrap_or("").to_string();
-                let want = msg["arguments"]["breakpoints"].as_array().cloned().unwrap_or_default();
+                let src_path = msg["arguments"]["source"]["path"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let want = msg["arguments"]["breakpoints"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
                 // Breakpoints go to Hermes, so give the app a moment to connect.
                 let _ = wait_for_target(&senders);
 
                 // Clear this file's previous breakpoints before re-setting.
                 if let Some(old) = bps_by_src.remove(&src_path) {
                     for id in old {
-                        let _ = debug_request(&senders, "Debugger.removeBreakpoint", json!({ "breakpointId": id }));
+                        let _ = debug_request(
+                            &senders,
+                            "Debugger.removeBreakpoint",
+                            json!({ "breakpointId": id }),
+                        );
                     }
                 }
 
@@ -145,7 +190,9 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                     let line = b["line"].as_i64().unwrap_or(0);
                     let condition = b["condition"].as_str().filter(|c| !c.is_empty());
                     // Map original .tsx line → generated bundle position.
-                    let mapped = smap.as_ref().and_then(|(_, sm)| map_breakpoint(sm, &src_path, line));
+                    let mapped = smap
+                        .as_ref()
+                        .and_then(|(_, sm)| map_breakpoint(sm, &src_path, line));
                     match mapped {
                         Some((gline, gcol)) => {
                             let mut params = json!({
@@ -156,8 +203,12 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                             if let Some(c) = condition {
                                 params["condition"] = json!(c);
                             }
-                            let res = debug_request(&senders, "Debugger.setBreakpointByUrl", params);
-                            let bound = res["locations"].as_array().map(|a| !a.is_empty()).unwrap_or(false);
+                            let res =
+                                debug_request(&senders, "Debugger.setBreakpointByUrl", params);
+                            let bound = res["locations"]
+                                .as_array()
+                                .map(|a| !a.is_empty())
+                                .unwrap_or(false);
                             if let Some(id) = res["breakpointId"].as_str() {
                                 ids.push(id.to_string());
                             }
@@ -169,10 +220,19 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                 if !ids.is_empty() {
                     bps_by_src.insert(src_path, ids);
                 }
-                respond(&writer, &seq, req_seq, &command, json!({ "breakpoints": out }));
+                respond(
+                    &writer,
+                    &seq,
+                    req_seq,
+                    &command,
+                    json!({ "breakpoints": out }),
+                );
             }
             "setExceptionBreakpoints" => {
-                let filters = msg["arguments"]["filters"].as_array().cloned().unwrap_or_default();
+                let filters = msg["arguments"]["filters"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
                 let has = |f: &str| filters.iter().any(|x| x.as_str() == Some(f));
                 let state = if has("all") {
                     "all"
@@ -181,25 +241,43 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                 } else {
                     "none"
                 };
-                debug_request(&senders, "Debugger.setPauseOnExceptions", json!({ "state": state }));
+                debug_request(
+                    &senders,
+                    "Debugger.setPauseOnExceptions",
+                    json!({ "state": state }),
+                );
                 respond(&writer, &seq, req_seq, &command, json!({}));
             }
             "evaluate" => {
-                let expr = msg["arguments"]["expression"].as_str().unwrap_or("").to_string();
+                let expr = msg["arguments"]["expression"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
                 // Evaluate in the selected frame when paused, else globally.
-                let call_frame_id = msg["arguments"]["frameId"]
-                    .as_i64()
-                    .and_then(|i| raw.lock().unwrap().get(i as usize).and_then(|f| f["callFrameId"].as_str().map(String::from)));
+                let call_frame_id = msg["arguments"]["frameId"].as_i64().and_then(|i| {
+                    raw.lock()
+                        .unwrap()
+                        .get(i as usize)
+                        .and_then(|f| f["callFrameId"].as_str().map(String::from))
+                });
                 let res = if let Some(cfid) = call_frame_id {
-                    debug_request(&senders, "Debugger.evaluateOnCallFrame", json!({
-                        "callFrameId": cfid, "expression": expr,
-                        "includeCommandLineAPI": true, "generatePreview": true, "silent": true,
-                    }))
+                    debug_request(
+                        &senders,
+                        "Debugger.evaluateOnCallFrame",
+                        json!({
+                            "callFrameId": cfid, "expression": expr,
+                            "includeCommandLineAPI": true, "generatePreview": true, "silent": true,
+                        }),
+                    )
                 } else {
-                    debug_request(&senders, "Runtime.evaluate", json!({
-                        "expression": expr,
-                        "includeCommandLineAPI": true, "generatePreview": true, "silent": true,
-                    }))
+                    debug_request(
+                        &senders,
+                        "Runtime.evaluate",
+                        json!({
+                            "expression": expr,
+                            "includeCommandLineAPI": true, "generatePreview": true, "silent": true,
+                        }),
+                    )
                 };
                 if res["exceptionDetails"].is_object() {
                     let m = res["exceptionDetails"]["exception"]["description"]
@@ -209,40 +287,62 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                     respond_fail(&writer, &seq, req_seq, &command, m);
                 } else {
                     let (display, child) = describe_value(&res["result"], &var_refs, &next_ref);
-                    respond(&writer, &seq, req_seq, &command, json!({ "result": display, "variablesReference": child }));
+                    respond(
+                        &writer,
+                        &seq,
+                        req_seq,
+                        &command,
+                        json!({ "result": display, "variablesReference": child }),
+                    );
                 }
             }
             "threads" => {
-                respond(&writer, &seq, req_seq, &command, json!({"threads": [{"id": 1, "name": "Hermes"}]}));
+                respond(
+                    &writer,
+                    &seq,
+                    req_seq,
+                    &command,
+                    json!({"threads": [{"id": 1, "name": "Hermes"}]}),
+                );
             }
             "stackTrace" => {
                 let fr = frames.lock().unwrap();
-                let sframes: Vec<Value> = fr.iter().enumerate().map(|(i, f)| {
-                    // Only frames that map to a real local source file are
-                    // navigable. Internal/bundle frames come back as http(s)
-                    // URLs — the editor must NOT try to open those (it fetches
-                    // the whole bundle and the generated line is out of range).
-                    let navigable = !f.file.is_empty() && !f.file.contains("://");
-                    if navigable {
-                        json!({
-                            "id": i,
-                            "name": f.name,
-                            "line": f.line,
-                            "column": f.column.max(1),
-                            "source": { "path": f.file, "name": basename(&f.file) },
-                        })
-                    } else {
-                        json!({
-                            "id": i,
-                            "name": f.name,
-                            "line": 0,
-                            "column": 0,
-                            "presentationHint": "subtle",
-                        })
-                    }
-                }).collect();
+                let sframes: Vec<Value> = fr
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        // Only frames that map to a real local source file are
+                        // navigable. Internal/bundle frames come back as http(s)
+                        // URLs — the editor must NOT try to open those (it fetches
+                        // the whole bundle and the generated line is out of range).
+                        let navigable = !f.file.is_empty() && !f.file.contains("://");
+                        if navigable {
+                            json!({
+                                "id": i,
+                                "name": f.name,
+                                "line": f.line,
+                                "column": f.column.max(1),
+                                "source": { "path": f.file, "name": basename(&f.file) },
+                            })
+                        } else {
+                            json!({
+                                "id": i,
+                                "name": f.name,
+                                "line": 0,
+                                "column": 0,
+                                "presentationHint": "subtle",
+                            })
+                        }
+                    })
+                    .collect();
                 let total = sframes.len();
-                respond(&writer, &seq, req_seq, &command, json!({"stackFrames": sframes, "totalFrames": total}));
+                respond(
+                    &writer,
+                    &seq,
+                    req_seq,
+                    &command,
+                    json!({"stackFrames": sframes, "totalFrames": total}),
+                );
             }
             "scopes" => {
                 let frame_id = msg["arguments"]["frameId"].as_i64().unwrap_or(0);
@@ -255,9 +355,14 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                 let scopes: Vec<Value> = chain
                     .iter()
                     .filter_map(|sc| {
-                        let oid = sc["object"]["objectId"].as_str().filter(|s| !s.is_empty())?;
+                        let oid = sc["object"]["objectId"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())?;
                         let kind = sc["type"].as_str().unwrap_or("scope");
-                        let name = sc["name"].as_str().map(|s| s.to_string()).unwrap_or_else(|| cap(kind));
+                        let name = sc["name"]
+                            .as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| cap(kind));
                         Some(json!({
                             "name": name,
                             "variablesReference": alloc_ref(&var_refs, &next_ref, oid),
@@ -273,14 +378,19 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
                 let object_id = var_refs.lock().unwrap().get(&vref).cloned();
                 let mut vars = Vec::new();
                 if let Some(oid) = object_id {
-                    let result = debug_request(&senders, "Runtime.getProperties", json!({"objectId": oid, "ownProperties": true, "generatePreview": true}));
+                    let result = debug_request(
+                        &senders,
+                        "Runtime.getProperties",
+                        json!({"objectId": oid, "ownProperties": true, "generatePreview": true}),
+                    );
                     if let Some(props) = result["result"].as_array() {
                         for p in props {
                             if p["enumerable"].as_bool() == Some(false) {
                                 continue;
                             }
                             let name = p["name"].as_str().unwrap_or("").to_string();
-                            let (display, child) = describe_value(&p["value"], &var_refs, &next_ref);
+                            let (display, child) =
+                                describe_value(&p["value"], &var_refs, &next_ref);
                             vars.push(json!({ "name": name, "value": display, "variablesReference": child }));
                         }
                     }
@@ -289,7 +399,13 @@ fn session(stream: TcpStream, senders: Senders, debug_sink: DebugSink, bundle: U
             }
             "continue" => {
                 step(&senders, ConnCmd::Continue);
-                respond(&writer, &seq, req_seq, &command, json!({"allThreadsContinued": true}));
+                respond(
+                    &writer,
+                    &seq,
+                    req_seq,
+                    &command,
+                    json!({"allThreadsContinued": true}),
+                );
             }
             "next" => {
                 step(&senders, ConnCmd::StepOver);
@@ -359,16 +475,25 @@ fn debug_request(senders: &Senders, method: &str, params: Value) -> Value {
         let map = senders.lock().unwrap();
         match map.values().next() {
             Some(s) => {
-                let _ = s.send(ConnCmd::DebugRequest { method: method.to_string(), params, reply: tx });
+                let _ = s.send(ConnCmd::DebugRequest {
+                    method: method.to_string(),
+                    params,
+                    reply: tx,
+                });
             }
             None => return Value::Null,
         }
     }
-    rx.recv_timeout(Duration::from_secs(3)).unwrap_or(Value::Null)
+    rx.recv_timeout(Duration::from_secs(3))
+        .unwrap_or(Value::Null)
 }
 
 /// Allocate a fresh variablesReference pointing at a CDP objectId.
-fn alloc_ref(refs: &Arc<Mutex<HashMap<i64, String>>>, next: &Arc<Mutex<i64>>, object_id: &str) -> i64 {
+fn alloc_ref(
+    refs: &Arc<Mutex<HashMap<i64, String>>>,
+    next: &Arc<Mutex<i64>>,
+    object_id: &str,
+) -> i64 {
     let id = {
         let mut n = next.lock().unwrap();
         let v = *n;
@@ -389,7 +514,11 @@ fn cap(s: &str) -> String {
 
 /// A CDP RemoteObject → (display string, child variablesReference). Objects and
 /// functions with an objectId are expandable; everything else is a leaf (ref 0).
-fn describe_value(v: &Value, refs: &Arc<Mutex<HashMap<i64, String>>>, next: &Arc<Mutex<i64>>) -> (String, i64) {
+fn describe_value(
+    v: &Value,
+    refs: &Arc<Mutex<HashMap<i64, String>>>,
+    next: &Arc<Mutex<i64>>,
+) -> (String, i64) {
     let ty = v["type"].as_str().unwrap_or("");
     let display = if let Some(s) = v["value"].as_str() {
         format!("\"{s}\"")
@@ -517,29 +646,41 @@ fn write_msg(writer: &Writer, seq: &Seq, mut msg: Value) {
 }
 
 fn respond(writer: &Writer, seq: &Seq, req_seq: i64, command: &str, body: Value) {
-    write_msg(writer, seq, json!({
-        "type": "response",
-        "request_seq": req_seq,
-        "success": true,
-        "command": command,
-        "body": body,
-    }));
+    write_msg(
+        writer,
+        seq,
+        json!({
+            "type": "response",
+            "request_seq": req_seq,
+            "success": true,
+            "command": command,
+            "body": body,
+        }),
+    );
 }
 
 fn respond_fail(writer: &Writer, seq: &Seq, req_seq: i64, command: &str, message: &str) {
-    write_msg(writer, seq, json!({
-        "type": "response",
-        "request_seq": req_seq,
-        "success": false,
-        "command": command,
-        "message": message,
-    }));
+    write_msg(
+        writer,
+        seq,
+        json!({
+            "type": "response",
+            "request_seq": req_seq,
+            "success": false,
+            "command": command,
+            "message": message,
+        }),
+    );
 }
 
 fn event(writer: &Writer, seq: &Seq, event: &str, body: Value) {
-    write_msg(writer, seq, json!({
-        "type": "event",
-        "event": event,
-        "body": body,
-    }));
+    write_msg(
+        writer,
+        seq,
+        json!({
+            "type": "event",
+            "event": event,
+            "body": body,
+        }),
+    );
 }
