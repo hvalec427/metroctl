@@ -1564,11 +1564,11 @@ fn footer(view: &RnView, is_logs: bool) -> String {
                 }
                 let pane = if view.detail {
                     let z = if view.maximized { "z split" } else { "z max" };
-                    format!("⏎ close · {z} · {{}} sect · o nvim")
+                    format!("⏎ close · {z} · {{}} sect")
                 } else {
                     "⏎ inspect".into()
                 };
-                return format!("{devs} s select in app · h/l fold · u parent · {pane} · / search · f filter{reload}{quit}");
+                return format!("{devs} s select in app · h/l fold · u parent · o source · {pane} · / search · f filter{reload}{quit}");
             }
             if view.detail {
                 let nn = if view.search.is_empty() {
@@ -1922,6 +1922,26 @@ fn source_line_at_cursor(view: &RnView) -> Option<String> {
     src.last().cloned()
 }
 
+/// `o` in the Components tab: open where the selected component is defined.
+fn open_component_source(view: &mut RnView) {
+    let src = view
+        .active_tree()
+        .and_then(|t| t.source())
+        .map(String::from);
+    let Some((file, line_no)) = src
+        .as_deref()
+        .and_then(|s| parse_location(&format!("({s})")))
+    else {
+        view.flash = Some("no source file for this component".into());
+        return;
+    };
+    let path = resolve_path(&file, view.root.as_deref());
+    match open_in_nvim(&path, line_no) {
+        Ok(()) => view.flash = Some(format!("opening {file}:{line_no}")),
+        Err(e) => view.flash = Some(e),
+    }
+}
+
 fn open_at_cursor(view: &mut RnView) {
     let line = match source_line_at_cursor(view) {
         Some(l) => l,
@@ -2079,6 +2099,11 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
     }
 
     view.flash = None;
+    // The tree's one location: the selected component's source, from anywhere.
+    if view.tab == Tab::Components && key.code == KeyCode::Char('o') {
+        open_component_source(view);
+        return false;
+    }
     if view.tab == Tab::Components && !(view.detail && view.maximized) {
         match key.code {
             KeyCode::Char('s') => {
@@ -2615,6 +2640,32 @@ mod tests {
         // A third of the pane, plus the (blank) fold marker and its space.
         assert_eq!(indent(rows.last().unwrap()), view.detail_width / 3 + 2);
         assert_eq!(indent(&rows[0]), 0, "rows above the shift sit at the edge");
+    }
+
+    #[test]
+    fn o_needs_a_source() {
+        let (mut view, client, _sent) = components();
+        view.tick(&client);
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "operations".into(),
+            tree_ops(),
+        ));
+        key(&mut view, &client, KeyCode::Char('o'));
+        assert_eq!(
+            view.flash.as_deref(),
+            Some("no source file for this component")
+        );
+        view.tick(&client);
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "inspectedElement".into(),
+            json!({"id": 2, "type": "full-data", "value": {"signalboxSource": "/app/src/App.tsx:7"}}),
+        ));
+        assert_eq!(
+            view.active_tree().unwrap().source(),
+            Some("/app/src/App.tsx:7")
+        );
     }
 
     #[test]

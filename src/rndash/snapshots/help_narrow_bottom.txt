@@ -1,19 +1,18 @@
 ┌ Proces┌ Keys ────────────────────────────────────────────────────────┐───────┐
-│       │   V           visual select, then y                          │       │
-│Press  │   y           copy                                           │       │
-│       │   c           clear                                          │       │
-│       │   p           clear on reload on/off                         │ UDID-1│
-│       │                                                              │       │
+│       │   y           copy                                           │       │
+│Press  │   c           clear                                          │       │
+│       │   p           clear on reload on/off                         │       │
+│       │                                                              │ UDID-1│
 │       │ Open entry                                                   │       │
 │       │   ⏎ / Esc     close                                          │       │
 │       │   J K         scroll the entry (split view)                  │       │
 │       │   {  }        previous / next section                        │       │
 │       │   o           open file:line in nvim                         │       │
-│       │   F           show framework stack frames                    │pen · l│
-└───────│                                                              │───────┘
-┌ JS Log│ Network                                                      │───────┐
-│ … · … │   e           errors only                                    │ents   │
-│       │   m           cycle method filter                            │       │
+│       │   F           show framework stack frames                    │       │
+│       │                                                              │pen · l│
+└───────│ Network                                                      │───────┘
+┌ JS Log│   e           errors only                                    │───────┐
+│ … · … │   m           cycle method filter                            │ents   │
 │       │   c / C       copy as curl                                   │       │
 │       │                                                              │       │
 │       │ Components                                                   │       │
@@ -21,6 +20,7 @@
 │       │   h l  ← →    fold / unfold, or out / in                     │       │
 │       │   u           parent                                         │       │
 │       │   ⏎           props, state, hooks, source                    │       │
+│       │   o           open its source in nvim                        │       │
 │       │                                                              │       │
 │       │ Debugger (paused)                                            │       │
 │       │   F5          continue                                       │       │

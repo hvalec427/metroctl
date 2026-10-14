@@ -25,62 +25,9 @@ const DEVTOOLS_BINDING: &str = "__CHROME_DEVTOOLS_FRONTEND_BINDING__";
 /// dispatcher, RN 0.76+). Replaces whichever frontend it had.
 const DEVTOOLS_INIT_JS: &str = "typeof __FUSEBOX_REACT_DEVTOOLS_DISPATCHER__ === 'undefined' ? 'missing' : (__FUSEBOX_REACT_DEVTOOLS_DISPATCHER__.initializeDomain('react-devtools'), 'ok')";
 
-/// Tap-to-select on text: React Native's overlay hands the agent the hit
-/// view's public instance, but Fabric creates a text's public instance lazily,
-/// after the React DevTools backend filed the text under its host instance. So
-/// the tap resolves to nothing and is dropped. Wrap each renderer's hit test to
-/// hand over the nearest host instance the agent knows: the hit component's
-/// own host (`closestInstance` is the `Text` component, its host a child), else
-/// an ancestor's. Idempotent; re-run after a reload.
-const DEVTOOLS_TAP_FIX_JS: &str = r#"(() => {
-  const hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-  if (hook == null || hook.renderers == null) return 'unsupported';
-  const known = (target) => {
-    const agent = hook.reactDevtoolsAgent;
-    return target != null && agent != null && agent.getIDForHostInstance(target) != null;
-  };
-  const resolve = (fiber) => {
-    let start = fiber;
-    for (let c = fiber; c != null; c = c.child) {
-      if (c.tag === 5 || c.tag === 6) {
-        start = c;
-        break;
-      }
-    }
-    for (let f = start; f != null; f = f.return) {
-      const node = f.stateNode;
-      if (node == null || typeof node !== 'object') continue;
-      const pub = node.canonical && node.canonical.publicInstance;
-      if (known(pub)) return pub;
-      if (known(node)) return node;
-    }
-    return null;
-  };
-  const patch = (renderer) => {
-    const config = renderer && renderer.rendererConfig;
-    const current = config && config.getInspectorDataForViewAtPoint;
-    if (typeof current !== 'function' || current.__signalbox === 2) return;
-    const hit = current.__signalboxOriginal || current;
-    const wrapped = function (view, x, y, callback) {
-      return hit.call(this, view, x, y, (data) => {
-        if (data && data.closestInstance != null && !known(data.closestPublicInstance)) {
-          const target = resolve(data.closestInstance);
-          if (target != null) data = Object.assign({}, data, {closestPublicInstance: target});
-        }
-        return callback(data);
-      });
-    };
-    wrapped.__signalbox = 2;
-    wrapped.__signalboxOriginal = hit;
-    config.getInspectorDataForViewAtPoint = wrapped;
-  };
-  hook.renderers.forEach(patch);
-  if (!hook.__signalboxTapFix) {
-    hook.__signalboxTapFix = true;
-    hook.on('renderer', (e) => patch(e && e.renderer));
-  }
-  return 'ok';
-})()"#;
+/// Fixes React Native's tap-to-select (`s`) for pager pages and text; see the
+/// file. Idempotent; re-run after a reload.
+const DEVTOOLS_TAP_FIX_JS: &str = include_str!("devtools_tap_fix.js");
 
 thread_local! {
     /// Frames `await_result` read while waiting for a reply to its own command.

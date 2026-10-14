@@ -94,6 +94,7 @@ const HELP_RIGHT: &[KeySection] = &[
             ("h l  ← →", "fold / unfold, or out / in"),
             ("u", "parent"),
             ("⏎", "props, state, hooks, source"),
+            ("o", "open its source in nvim"),
         ],
     ),
     (

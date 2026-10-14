@@ -377,6 +377,13 @@ impl Tree {
         }
     }
 
+    /// Where the selected component is defined in the project ("file:line"),
+    /// once inspected.
+    pub fn source(&self) -> Option<&str> {
+        let (id, v) = self.inspected.as_ref()?;
+        (Some(*id) == self.selected).then(|| v["signalboxSource"].as_str())?
+    }
+
     /// The detail pane for the selected component.
     pub fn detail_lines(&self) -> Vec<String> {
         let Some(id) = self.selected else {
@@ -436,7 +443,7 @@ impl Tree {
             }
         }
         // Only a location in the project: a bundle address can't be opened.
-        if let Some(s) = v["signalboxSource"].as_str() {
+        if let Some(s) = self.source() {
             out.push("── Source ──".into());
             out.push(format!("  at {name} ({s})"));
         }

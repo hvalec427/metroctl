@@ -1,7 +1,6 @@
 ┌ Processes  no processes ───────────────────────────────────────────────────┐┌ Devices & Actions ───────────────────────────────┐
-│                                                                            ││Metro  ○ stopped  (m)                             │
-│Pres┌ Keys ────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐    │
-│    │ Global                                                     Logs · Network · Perf                                     │    │
+│    ┌ Keys ────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐    │
+│Pres│ Global                                                     Logs · Network · Perf                                     │    │
 │    │   ⇥ / ⇧⇥      next / previous pane                           1-9         switch device                               │    │
 │    │   ^←→↑↓       resize panes                                   /  n N      search, next / previous match               │    │
 │    │   R           reload the app                                 f           filter                                      │    │
@@ -15,10 +14,10 @@
 │    │   space       autoscroll on/off                            Open entry                                                │    │
 │    │   [  ]        previous / next tab                            ⏎ / Esc     close                                       │    │
 │    │                                                              J K         scroll the entry (split view)               │    │
-└────│ Processes                                                    {  }        previous / next section                     │────┘
-┌ JS │   ⏎           type into the process (Esc leaves)             o           open file:line in nvim                      │────┐
-│ … ·│   x           stop it                                        F           show framework stack frames                 │    │
-│    │   d           delete a stopped tab                                                                                   │    │
+│    │ Processes                                                    {  }        previous / next section                     │    │
+└────│   ⏎           type into the process (Esc leaves)             o           open file:line in nvim                      │────┘
+┌ JS │   x           stop it                                        F           show framework stack frames                 │────┐
+│ … ·│   d           delete a stopped tab                                                                                   │    │
 │    │   m           start / restart Metro (takes over an externa Network                                                   │    │
 │    │   c           deep clean (reinstalls)                        e           errors only                                 │    │
 │    │   i           reinstall deps + pods                          m           cycle method filter                         │    │
@@ -29,7 +28,8 @@
 │    │   s           stop it                                        h l  ← →    fold / unfold, or out / in                  │    │
 │    │   b           build & run on it                              u           parent                                      │    │
 │    │   o           open the app                                   ⏎           props, state, hooks, source                 │    │
-│    │   l           open a deep link (fills ‹placeholders›; / se                                                           │    │
+│    │   l           open a deep link (fills ‹placeholders›; / se   o           open its source in nvim                     │    │
+│    │                                                                                                                      │    │
 │    │                                                            Debugger (paused)                                         │    │
 │    │                                                              F5          continue                                    │    │
 │    │                                                              F10         step over                                   │    │

@@ -30,7 +30,8 @@ The app's React component tree, like the Components panel in React Native DevToo
 | `h` / `←` | fold the component, or go to its parent |
 | `l` / `→` | unfold it, or go to its first child |
 | `u` | go to the parent |
-| `⏎` / `z` | inspect it: props, state, hooks, context, errors, who rendered it, and where it's defined (`o` opens that in nvim) |
+| `⏎` / `z` | inspect it: props, state, hooks, context, errors, who rendered it, and where it's defined |
+| `o` | open where it's defined in nvim (from the tree or the panel) |
 | `/` · `f` | search · filter by component name |
 
 - The inspected component refreshes every second, so props and state stay current.
