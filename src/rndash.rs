@@ -1569,27 +1569,29 @@ fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
         Some((q, _)) => link_matches(links, q),
         None => (0..links.len()).filter(|&i| picker_char(i).is_some()).collect(),
     };
-    let h = (shown.len() as u16 + 4 + if search.is_some() { 2 } else { 0 }).clamp(6, area.height);
-    let r = centered(area, 64, h);
-    frame.render_widget(Clear, r);
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(" Deep links · esc ");
-    let inner = block.inner(r);
-    frame.render_widget(block, r);
     let key_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-    let mut lines: Vec<Line> = Vec::new();
-    if let Some((q, _)) = search {
-        lines.push(Line::from(vec![Span::styled(" / ", key_style), Span::raw(format!("  {q}█"))]));
-        lines.push(Line::raw(""));
-    }
+
+    // The list itself, with a heading above each run of links in one group.
+    let mut body: Vec<Line> = Vec::new();
+    let mut heading_rows: Vec<usize> = Vec::new();
+    let mut group: Option<&str> = None;
     for (row, &i) in shown.iter().enumerate() {
         let d = &links[i];
+        if d.group().is_some() && d.group() != group {
+            if !body.is_empty() {
+                body.push(Line::raw(""));
+            }
+            heading_rows.push(body.len());
+            body.push(Line::styled(format!(" {}", d.group().unwrap()), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        }
+        group = d.group();
         // While searching, keys are typed into the query: ⏎ opens the highlighted match.
         let (key, label) = match search {
             Some((_, sel)) if *sel == row => ("  ▸".to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Some(_) => ("   ".to_string(), Style::default()),
             None => (format!(" {} ", picker_char(i).unwrap_or(' ')), Style::default()),
         };
-        lines.push(Line::from(vec![
+        body.push(Line::from(vec![
             Span::styled(key, if search.is_some() { Style::default().fg(Color::Cyan) } else { key_style }),
             Span::styled(format!("  {}", d.label()), label),
             Span::styled(
@@ -1598,13 +1600,52 @@ fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
             ),
         ]));
     }
-    lines.push(Line::raw(""));
-    if search.is_some() {
-        lines.push(Line::styled(" type to filter · ↑↓ select · ⏎ open · esc back", Style::default().fg(Color::DarkGray)));
-    } else {
-        lines.push(Line::from(vec![Span::styled(" / ", key_style), Span::raw("  search    "), Span::styled(" : ", key_style), Span::raw("  paste any URL (e.g. a magic login link)")]));
+
+    let mut head: Vec<Line> = Vec::new();
+    if let Some((q, _)) = search {
+        head.push(Line::from(vec![Span::styled(" / ", key_style), Span::raw(format!("  {q}█"))]));
+        head.push(Line::raw(""));
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    let foot: Vec<Line> = vec![
+        Line::raw(""),
+        if search.is_some() {
+            Line::styled(" type to filter · ↑↓ select · ⏎ open · esc back", Style::default().fg(Color::DarkGray))
+        } else {
+            Line::from(vec![Span::styled(" / ", key_style), Span::raw("  search    "), Span::styled(" : ", key_style), Span::raw("  paste any URL (e.g. a magic login link)")])
+        },
+    ];
+
+    // Too tall for the terminal: split into two columns, at a group heading near the middle.
+    let chrome = (head.len() + foot.len() + 2) as u16;
+    let split = if body.len() as u16 + chrome > area.height && area.width >= 128 {
+        let mid = body.len().div_ceil(2);
+        let at = heading_rows.iter().copied().filter(|&r| r > 0).min_by_key(|&r| r.abs_diff(mid)).filter(|&r| r.abs_diff(mid) <= mid / 3).unwrap_or(mid);
+        Some(at)
+    } else {
+        None
+    };
+    let (rows, w) = match split {
+        Some(at) => (at.max(body.len() - at), 128),
+        None => (body.len(), 64),
+    };
+    let r = centered(area, w, (rows as u16 + chrome).clamp(6, area.height));
+    frame.render_widget(Clear, r);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(" Deep links · esc ");
+    let inner = block.inner(r);
+    frame.render_widget(block, r);
+    let [head_area, body_area, foot_area] =
+        Layout::vertical([Constraint::Length(head.len() as u16), Constraint::Min(0), Constraint::Length(foot.len() as u16)]).areas(inner);
+    frame.render_widget(Paragraph::new(Text::from(head)), head_area);
+    frame.render_widget(Paragraph::new(Text::from(foot)), foot_area);
+    match split {
+        Some(at) => {
+            let right: Vec<Line> = body.split_off(at).into_iter().skip_while(|l| l.width() == 0).collect();
+            let [left_area, right_area] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body_area);
+            frame.render_widget(Paragraph::new(Text::from(body)), left_area);
+            frame.render_widget(Paragraph::new(Text::from(right)), right_area);
+        }
+        None => frame.render_widget(Paragraph::new(Text::from(body)), body_area),
+    }
 }
 
 type KeySection = (&'static str, &'static [(&'static str, &'static str)]);

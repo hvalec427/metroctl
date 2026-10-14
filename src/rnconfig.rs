@@ -79,12 +79,18 @@ pub struct MetroConfig {
 }
 
 /// A deep link entry: either a bare URL string, or `{ "name": …, "url": … }`
-/// for a friendlier label in the picker.
+/// for a friendlier label in the picker, optionally with a `"group"`: the
+/// picker puts a heading above each run of links that share one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DeepLink {
     Url(String),
-    Named { name: String, url: String },
+    Named {
+        name: String,
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+    },
 }
 
 /// `<name>` / `{name}` placeholders in a link, in order, without duplicates.
@@ -140,6 +146,12 @@ impl DeepLink {
         match self {
             DeepLink::Url(u) => u,
             DeepLink::Named { name, .. } => name,
+        }
+    }
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            DeepLink::Url(_) => None,
+            DeepLink::Named { group, .. } => group.as_deref(),
         }
     }
 }
@@ -393,6 +405,14 @@ fn project_in_worktree(cfg: &RnConfig, main: &Path, worktree: &Path, dir: &Path)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_link_group() {
+        let links: Vec<DeepLink> =
+            serde_json::from_str(r#"["app://", {"name": "A", "url": "app://a"}, {"name": "B", "url": "app://b", "group": "Tabs"}]"#).unwrap();
+        assert_eq!(links.iter().map(|d| d.group()).collect::<Vec<_>>(), vec![None, None, Some("Tabs")]);
+        assert_eq!(links[2].label(), "B");
+    }
 
     #[test]
     fn package_manager_commands() {
