@@ -17,6 +17,71 @@ use std::time::Duration;
 /// Hermes/fusebox handshake. Resolved once per process.
 static CDP_TRACE: OnceLock<Option<String>> = OnceLock::new();
 
+/// The CDP binding React Native DevTools' frontend registers; the app's React
+/// DevTools backend sends its bridge messages through it.
+const DEVTOOLS_BINDING: &str = "__CHROME_DEVTOOLS_FRONTEND_BINDING__";
+
+/// Connect the app's React DevTools backend to us (React Native's Fusebox
+/// dispatcher, RN 0.76+). Replaces whichever frontend it had.
+const DEVTOOLS_INIT_JS: &str = "typeof __FUSEBOX_REACT_DEVTOOLS_DISPATCHER__ === 'undefined' ? 'missing' : (__FUSEBOX_REACT_DEVTOOLS_DISPATCHER__.initializeDomain('react-devtools'), 'ok')";
+
+/// Tap-to-select on text: React Native's overlay hands the agent the hit
+/// view's public instance, but Fabric creates a text's public instance lazily,
+/// after the React DevTools backend filed the text under its host instance. So
+/// the tap resolves to nothing and is dropped. Wrap each renderer's hit test to
+/// hand over the nearest host instance the agent knows: the hit component's
+/// own host (`closestInstance` is the `Text` component, its host a child), else
+/// an ancestor's. Idempotent; re-run after a reload.
+const DEVTOOLS_TAP_FIX_JS: &str = r#"(() => {
+  const hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+  if (hook == null || hook.renderers == null) return 'unsupported';
+  const known = (target) => {
+    const agent = hook.reactDevtoolsAgent;
+    return target != null && agent != null && agent.getIDForHostInstance(target) != null;
+  };
+  const resolve = (fiber) => {
+    let start = fiber;
+    for (let c = fiber; c != null; c = c.child) {
+      if (c.tag === 5 || c.tag === 6) {
+        start = c;
+        break;
+      }
+    }
+    for (let f = start; f != null; f = f.return) {
+      const node = f.stateNode;
+      if (node == null || typeof node !== 'object') continue;
+      const pub = node.canonical && node.canonical.publicInstance;
+      if (known(pub)) return pub;
+      if (known(node)) return node;
+    }
+    return null;
+  };
+  const patch = (renderer) => {
+    const config = renderer && renderer.rendererConfig;
+    const current = config && config.getInspectorDataForViewAtPoint;
+    if (typeof current !== 'function' || current.__signalbox === 2) return;
+    const hit = current.__signalboxOriginal || current;
+    const wrapped = function (view, x, y, callback) {
+      return hit.call(this, view, x, y, (data) => {
+        if (data && data.closestInstance != null && !known(data.closestPublicInstance)) {
+          const target = resolve(data.closestInstance);
+          if (target != null) data = Object.assign({}, data, {closestPublicInstance: target});
+        }
+        return callback(data);
+      });
+    };
+    wrapped.__signalbox = 2;
+    wrapped.__signalboxOriginal = hit;
+    config.getInspectorDataForViewAtPoint = wrapped;
+  };
+  hook.renderers.forEach(patch);
+  if (!hook.__signalboxTapFix) {
+    hook.__signalboxTapFix = true;
+    hook.on('renderer', (e) => patch(e && e.renderer));
+  }
+  return 'ok';
+})()"#;
+
 thread_local! {
     /// Frames `await_result` read while waiting for a reply to its own command.
     /// Each CDP connection has its own thread, so this is per-connection; the
@@ -160,6 +225,10 @@ pub enum RnEvent {
     Paused(String, PausedInfo),
     /// Execution resumed (continue or step completed).
     Resumed(String),
+    /// A React DevTools bridge message from the app's backend (event, payload),
+    /// while the Components tab is attached. `signalbox:unavailable` (payload:
+    /// the reason) when the app has no backend to attach to.
+    Devtools(String, String, Value),
 }
 
 /// Where the JS VM stopped, already mapped back to an original source location.
@@ -179,6 +248,15 @@ pub enum ConnCmd {
     StepInto,
     StepOut,
     Pause,
+    /// Become the frontend of the app's React DevTools backend (the
+    /// Components tab), taking over from any other (React Native DevTools).
+    DevtoolsAttach,
+    DevtoolsDetach,
+    /// A React DevTools bridge message to the backend.
+    Devtools {
+        event: String,
+        payload: Value,
+    },
     /// Synchronous CDP call on behalf of a DAP session (scopes/variables/eval):
     /// send `method`+`params`, reply with the CDP `result`.
     DebugRequest {
@@ -231,6 +309,15 @@ impl RnClient {
             cmd_senders: Arc::default(),
             dap_error: None,
         }
+    }
+
+    /// A client whose commands for `key` land in the returned receiver.
+    #[cfg(test)]
+    pub fn recording(key: &str) -> (RnClient, Receiver<ConnCmd>) {
+        let client = RnClient::idle();
+        let (tx, rx) = std::sync::mpsc::channel();
+        client.cmd_senders.lock().unwrap().insert(key.into(), tx);
+        (client, rx)
     }
 
     pub fn send(&self, key: &str, cmd: ConnCmd) {
@@ -340,6 +427,8 @@ fn conn_loop(
     // sampler's `Runtime.evaluate` — it either queues behind the pause or
     // disturbs it. Set on `Debugger.paused`, cleared on `Debugger.resumed`.
     let mut paused = false;
+    // The Components tab is attached to this app's React DevTools backend.
+    let mut devtools = false;
     const FPS_EXPR: &str = "(function(){var s=globalThis.__simonFps;if(!s){s=globalThis.__simonFps={v:0,c:0,t:Date.now()};var loop=function(){s.c++;var n=Date.now();if(n-s.t>=1000){s.v=Math.round(s.c*1000/(n-s.t));s.c=0;s.t=n;}(globalThis.requestAnimationFrame||function(f){return setTimeout(f,16);})(loop);};loop();}return s.v;})()";
 
     loop {
@@ -410,6 +499,64 @@ fn conn_loop(
                 ConnCmd::StepInto => debug_cmd(&mut socket, &mut seq, "Debugger.stepInto"),
                 ConnCmd::StepOut => debug_cmd(&mut socket, &mut seq, "Debugger.stepOut"),
                 ConnCmd::Pause => debug_cmd(&mut socket, &mut seq, "Debugger.pause"),
+                ConnCmd::DevtoolsAttach => {
+                    devtools = true;
+                    cdp_send(
+                        &mut socket,
+                        &mut seq,
+                        "Runtime.addBinding",
+                        json!({ "name": DEVTOOLS_BINDING }),
+                    );
+                    evaluate(&mut socket, &mut seq, DEVTOOLS_TAP_FIX_JS);
+                    seq += 1;
+                    let rid = seq;
+                    let _ = socket.send(tungstenite::Message::Text(
+                        json!({"id": rid, "method": "Runtime.evaluate", "params": {
+                            "expression": DEVTOOLS_INIT_JS, "returnByValue": true}})
+                        .to_string(),
+                    ));
+                    let res = request_response(
+                        &mut socket,
+                        rid,
+                        key,
+                        tx,
+                        &mut records,
+                        &mut seq,
+                        port,
+                        &mut paused,
+                        &mut scripts,
+                        debug_sink,
+                    );
+                    let why = match res.as_ref().map(|r| &r["result"]["value"]) {
+                        Some(v) if v == "ok" => None,
+                        Some(v) if v == "missing" => Some("this app has no React DevTools backend (needs React Native 0.76+ in a dev build)"),
+                        _ => Some("couldn't reach the app's React DevTools backend"),
+                    };
+                    if let Some(why) = why {
+                        let _ = tx.send(RnEvent::Devtools(
+                            key.into(),
+                            "signalbox:unavailable".into(),
+                            json!(why),
+                        ));
+                    }
+                }
+                ConnCmd::DevtoolsDetach => {
+                    devtools = false;
+                    cdp_send(
+                        &mut socket,
+                        &mut seq,
+                        "Runtime.removeBinding",
+                        json!({ "name": DEVTOOLS_BINDING }),
+                    );
+                }
+                ConnCmd::Devtools { event, payload } => {
+                    let message = json!({ "event": event, "payload": payload }).to_string();
+                    let expr = format!(
+                        "__FUSEBOX_REACT_DEVTOOLS_DISPATCHER__.sendMessage('react-devtools', {})",
+                        serde_json::to_string(&message).unwrap_or_default()
+                    );
+                    evaluate(&mut socket, &mut seq, &expr);
+                }
                 ConnCmd::DebugRequest {
                     method,
                     params,
@@ -455,6 +602,11 @@ fn conn_loop(
                         debug_sink,
                     );
                 }
+                // A reload: the backend reconnects by itself (the binding
+                // survives), but the tap fix lived in the old JS context.
+                if devtools && t.contains("\"Runtime.executionContextCreated\"") {
+                    evaluate(&mut socket, &mut seq, DEVTOOLS_TAP_FIX_JS);
+                }
                 // Surface the app's main bundle URL for the DAP source-map fetch.
                 if bundle.lock().unwrap().is_none() {
                     if let Some(u) = scripts.values().find(|u| u.contains(".bundle")) {
@@ -471,6 +623,34 @@ fn conn_loop(
         }
     }
     let _ = tx.send(RnEvent::Status(key.into(), Status::Disconnected));
+}
+
+/// Send a CDP command without waiting for its reply.
+fn cdp_send(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    seq: &mut i64,
+    method: &str,
+    params: Value,
+) {
+    *seq += 1;
+    cdp_trace(">>", method);
+    let _ = socket.send(tungstenite::Message::Text(
+        json!({"id": *seq, "method": method, "params": params}).to_string(),
+    ));
+}
+
+/// Run JS in the app without waiting for the result.
+fn evaluate(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    seq: &mut i64,
+    expression: &str,
+) {
+    cdp_send(
+        socket,
+        seq,
+        "Runtime.evaluate",
+        json!({ "expression": expression }),
+    );
 }
 
 /// Send a parameterless Debugger command, allocating a fresh request id.
@@ -683,6 +863,26 @@ fn handle_message(
                 },
             ));
         }
+        "Runtime.bindingCalled" if msg["params"]["name"] == DEVTOOLS_BINDING => {
+            let Some(mut wrapped) = msg["params"]["payload"]
+                .as_str()
+                .and_then(|p| serde_json::from_str::<Value>(p).ok())
+            else {
+                return;
+            };
+            if wrapped["domain"] != "react-devtools" {
+                return;
+            }
+            let event = wrapped["message"]["event"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let mut payload = wrapped["message"]["payload"].take();
+            if event == "inspectedElement" {
+                symbolicate_source(port, &mut payload["value"]);
+            }
+            let _ = tx.send(RnEvent::Devtools(key.into(), event, payload));
+        }
         "Runtime.executionContextsCleared" => {
             records.clear();
             let _ = tx.send(RnEvent::ContextCleared(key.into()));
@@ -888,6 +1088,29 @@ fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
         None
     } else {
         Some(out)
+    }
+}
+
+/// Where an inspected component was defined, mapped from the bundle back to
+/// its source file (`signalboxSource`: "file:line").
+fn symbolicate_source(port: u16, value: &mut Value) {
+    let s = &value["source"];
+    let (Some(url), Some(line)) = (s["sourceURL"].as_str(), s["line"].as_i64()) else {
+        return;
+    };
+    let frame = json!({
+        "file": url,
+        "lineNumber": line,
+        "column": s["column"].as_i64().unwrap_or(0),
+        "methodName": "",
+    });
+    let mapped = post_symbolicate(port, vec![frame]);
+    if let Some(f) = mapped.as_ref().and_then(|m| m.first()) {
+        if let (Some(file), Some(line)) = (f["file"].as_str(), f["lineNumber"].as_i64()) {
+            if !file.is_empty() && !file.contains(".bundle") {
+                value["signalboxSource"] = json!(format!("{file}:{line}"));
+            }
+        }
     }
 }
 

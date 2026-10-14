@@ -39,6 +39,7 @@ fn main_loop(
         while let Ok(ev) = client.rx.try_recv() {
             view.on_event(ev);
         }
+        view.tick(client);
         terminal.draw(|f| view.render(f, f.area()))?;
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(k) = event::read()? {

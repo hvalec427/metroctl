@@ -1,26 +1,26 @@
 ┌ Proces┌ Keys ────────────────────────────────────────────────────────┐───────┐
-│       │ Logs · Network · Perf                                        │       │
-│Press  │   1-9         switch device                                  │       │
-│       │   /  n N      search, next / previous match                  │       │
-│       │   f           filter                                         │ UDID-1│
-│       │   ⏎           open the entry                                 │       │
-│       │   z           open maximized / toggle split                  │       │
 │       │   V           visual select, then y                          │       │
-│       │   y           copy                                           │       │
+│Press  │   y           copy                                           │       │
 │       │   c           clear                                          │       │
-│       │   p           clear on reload on/off                         │       │
-│       │                                                              │pen · l│
-└───────│ Open entry                                                   │───────┘
-┌ JS Log│   ⏎ / Esc     close                                          │───────┐
-│ … · … │   J K         scroll the entry (split view)                  │       │
+│       │   p           clear on reload on/off                         │ UDID-1│
+│       │                                                              │       │
+│       │ Open entry                                                   │       │
+│       │   ⏎ / Esc     close                                          │       │
+│       │   J K         scroll the entry (split view)                  │       │
 │       │   {  }        previous / next section                        │       │
 │       │   o           open file:line in nvim                         │       │
-│       │   F           show framework stack frames                    │       │
-│       │                                                              │       │
-│       │ Network                                                      │       │
-│       │   e           errors only                                    │       │
+│       │   F           show framework stack frames                    │pen · l│
+└───────│                                                              │───────┘
+┌ JS Log│ Network                                                      │───────┐
+│ … · … │   e           errors only                                    │ents   │
 │       │   m           cycle method filter                            │       │
 │       │   c / C       copy as curl                                   │       │
+│       │                                                              │       │
+│       │ Components                                                   │       │
+│       │   s           select by tapping it in the app                │       │
+│       │   h l  ← →    fold / unfold, or out / in                     │       │
+│       │   u           parent                                         │       │
+│       │   ⏎           props, state, hooks, source                    │       │
 │       │                                                              │       │
 │       │ Debugger (paused)                                            │       │
 │       │   F5          continue                                       │       │

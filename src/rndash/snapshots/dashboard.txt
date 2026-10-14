@@ -12,7 +12,7 @@
 │ ⏎ type · x stop · d delete · m metro · c clean · i instal││                                      │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────┘
 ┌ JS Logs / Network / Perf ────────────────────────────────────────────────────────────────────────┐
-│ … · … · keeps logs on reload   [Logs (0)]  Network (0)   Perf                                    │
+│ … · … · keeps logs on reload   [Logs (0)]  Network (0)   Perf   Components                       │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

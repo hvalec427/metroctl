@@ -150,7 +150,8 @@ Three tiled panes plus a status bar:
   is set, each running device also shows whether the app is installed (`app✓`/
   `app✗`) and whether it's in the foreground (`▶fg`). (iOS can't report these over
   the available tooling, so they're Android-only.)
-- **JS Logs / Network / Perf** — the full `signalbox logs` viewer embedded (see
+- **JS Logs / Network / Perf / Components** — the full `signalbox logs` viewer
+  embedded, including the app's React component tree with tap-to-select (see
   [docs/logs.md](docs/logs.md) for its keys).
 
 ### Keys

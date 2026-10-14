@@ -12,7 +12,7 @@
 │                                                          ││ s stop · b build · o open · l links  │
 └────────────────────────┌ Quit signalbox? ───────────────────────────────┐────────────────────────┘
 ┌ JS Logs / Network / Per│                                                │────────────────────────┐
-│ … · … · keeps logs on r│  This stops Metro and any running builds.      │                        │
+│ … · … · keeps logs on r│  This stops Metro and any running builds.      │s                       │
 │                        │  y/⏎ quit    n/esc cancel                      │                        │
 │                        └────────────────────────────────────────────────┘                        │
 │                                                                                                  │

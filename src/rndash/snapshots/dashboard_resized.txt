@@ -11,7 +11,7 @@
 │                                                               ││ s stop · b build · o open · l li│
 └───────────────────────────────────────────────────────────────┘└─────────────────────────────────┘
 ┌ JS Logs / Network / Perf ────────────────────────────────────────────────────────────────────────┐
-│ … · … · keeps logs on reload   [Logs (0)]  Network (0)   Perf                                    │
+│ … · … · keeps logs on reload   [Logs (0)]  Network (0)   Perf   Components                       │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

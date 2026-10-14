@@ -8,7 +8,7 @@ signalbox logs [--port 8081]
 
 Dev-only (Metro must be running); network depth depends on your RN version's CDP support. Piped or redirected, it falls back to a plain line stream.
 
-In a terminal it opens an **interactive viewer** (dark theme) with **Logs**, **Network**, and **Perf** tabs. The Logs/Network tabs have two modes (list and preview).
+In a terminal it opens an **interactive viewer** (dark theme) with **Logs**, **Network**, **Perf** and **Components** tabs. The Logs/Network/Components tabs have two modes (list and preview).
 
 ## Perf tab
 
@@ -18,6 +18,24 @@ A live dashboard for the active device, sampled once a second:
 - **JS heap** — used / total, via `Runtime.getHeapUsage` (shown only if the runtime reports it).
 
 > Native/UI FPS is **not** exposed over CDP, so only the JS-thread figure is available here — the same "JS" number RN's in-app perf monitor shows. Switch devices with `1`-`9`.
+
+## Components tab
+
+The app's React component tree, like the Components panel in React Native DevTools (it talks to the same React DevTools backend inside the app, so it needs React Native 0.76+ in a dev build).
+
+| Key | Action |
+|---|---|
+| `s` | select a component by tapping it in the app (`s` again cancels) |
+| `↑↓` / `jk` | move; the component under the cursor is outlined on the device |
+| `h` / `←` | fold the component, or go to its parent |
+| `l` / `→` | unfold it, or go to its first child |
+| `u` | go to the parent |
+| `⏎` / `z` | inspect it: props, state, hooks, context, errors, who rendered it, and where it's defined (`o` opens that in nvim) |
+| `/` · `f` | search · filter by component name |
+
+- The inspected component refreshes every second, so props and state stay current.
+- Values the backend sends as a preview (deep objects) are fetched once more, so props read a level or two deeper; past that they show as `{…}`.
+- The backend talks to one frontend at a time, so signalbox connects only while this tab is open. Opening the Components panel in React Native DevTools (`j` in Metro) takes it over; switch tabs and back to take it back.
 
 ### List mode (default, and the side-by-side split)
 

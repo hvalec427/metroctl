@@ -1,8 +1,6 @@
 ┌ Processes  no processes ───────────────────────────────────────────────────┐┌ Devices & Actions ───────────────────────────────┐
 │                                                                            ││Metro  ○ stopped  (m)                             │
-│Press  m  to start Metro.                                                   ││                                                  │
-│                                                                            ││ iOS Simulators                                   │
-│    ┌ Keys ────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐    │
+│Pres┌ Keys ────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐    │
 │    │ Global                                                     Logs · Network · Perf                                     │    │
 │    │   ⇥ / ⇧⇥      next / previous pane                           1-9         switch device                               │    │
 │    │   ^←→↑↓       resize panes                                   /  n N      search, next / previous match               │    │
@@ -15,26 +13,28 @@
 │    │   j k  ↑ ↓    move / scroll                                  p           clear on reload on/off                      │    │
 │    │   g  G        top / bottom                                                                                           │    │
 │    │   space       autoscroll on/off                            Open entry                                                │    │
-└────│   [  ]        previous / next tab                            ⏎ / Esc     close                                       │────┘
-┌ JS │                                                              J K         scroll the entry (split view)               │────┐
-│ … ·│ Processes                                                    {  }        previous / next section                     │    │
-│    │   ⏎           type into the process (Esc leaves)             o           open file:line in nvim                      │    │
-│    │   x           stop it                                        F           show framework stack frames                 │    │
+│    │   [  ]        previous / next tab                            ⏎ / Esc     close                                       │    │
+│    │                                                              J K         scroll the entry (split view)               │    │
+└────│ Processes                                                    {  }        previous / next section                     │────┘
+┌ JS │   ⏎           type into the process (Esc leaves)             o           open file:line in nvim                      │────┐
+│ … ·│   x           stop it                                        F           show framework stack frames                 │    │
 │    │   d           delete a stopped tab                                                                                   │    │
 │    │   m           start / restart Metro (takes over an externa Network                                                   │    │
 │    │   c           deep clean (reinstalls)                        e           errors only                                 │    │
 │    │   i           reinstall deps + pods                          m           cycle method filter                         │    │
 │    │   a           reset: deep clean, then Metro                  c / C       copy as curl                                │    │
 │    │                                                                                                                      │    │
-│    │ Devices                                                    Debugger (paused)                                         │    │
-│    │   ⏎           start the simulator / emulator                 F5          continue                                    │    │
-│    │   s           stop it                                        F10         step over                                   │    │
-│    │   b           build & run on it                              F11 / ⇧F11  step into / out                             │    │
-│    │   o           open the app                                   F6          pause                                       │    │
+│    │ Devices                                                    Components                                                │    │
+│    │   ⏎           start the simulator / emulator                 s           select by tapping it in the app             │    │
+│    │   s           stop it                                        h l  ← →    fold / unfold, or out / in                  │    │
+│    │   b           build & run on it                              u           parent                                      │    │
+│    │   o           open the app                                   ⏎           props, state, hooks, source                 │    │
 │    │   l           open a deep link (fills ‹placeholders›; / se                                                           │    │
+│    │                                                            Debugger (paused)                                         │    │
+│    │                                                              F5          continue                                    │    │
+│    │                                                              F10         step over                                   │    │
+│    │                                                              F11 / ⇧F11  step into / out                             │    │
+│    │                                                              F6          pause                                       │    │
 │    └─────────────────────────────────────────────────────────────────────────────────────────────────────── ? / esc close ┘    │
-│                                                                                                                                │
-│                                                                                                                                │
-│                                                                                                                                │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
  ⇥ focus · ^←→↑↓ resize · R reload · D dev-menu · ? keys · q quit

@@ -1104,6 +1104,7 @@ impl DashApp {
             while let Ok(ev) = self.client.rx.try_recv() {
                 self.rnview.on_event(ev);
             }
+            self.rnview.tick(&self.client);
             while let Ok(m) = self.rx.try_recv() {
                 match m {
                     DashMsg::Devices(v) => {

@@ -12,7 +12,7 @@
 │       │   g  G        top / bottom                                   │pen · l│
 └───────│   space       autoscroll on/off                              │───────┘
 ┌ JS Log│   [  ]        previous / next tab                            │───────┐
-│ … · … │                                                              │       │
+│ … · … │                                                              │ents   │
 │       │ Processes                                                    │       │
 │       │   ⏎           type into the process (Esc leaves)             │       │
 │       │   x           stop it                                        │       │

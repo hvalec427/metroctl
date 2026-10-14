@@ -1,8 +1,9 @@
 //! The React Native log viewer as an embeddable component. Holds the per-device
-//! Logs / Network / Perf state, reduces `RnEvent`s from `RnClient`, and renders
+//! Logs / Network / Perf / Components state, reduces `RnEvent`s from `RnClient`, and renders
 //! itself into an arbitrary `Rect` (the full screen for `logs --rn`, a pane in
 //! `signalbox`). Extracted from the old `rntui` so both share one implementation.
 
+use crate::components::Tree;
 use crate::rnclient::{
     format_js, ConnCmd, LogEntry, NetRecord, PausedInfo, RnClient, RnEvent, Status, TargetInfo,
     FRAMEWORK_FRAME,
@@ -288,6 +289,8 @@ struct Device {
     // `log_seq - logs.len() + i`.
     log_seq: u64,
     net_seq: u64,
+    /// The React component tree (Components tab).
+    comp: Tree,
 }
 
 impl Default for Device {
@@ -303,6 +306,7 @@ impl Default for Device {
             paused: None,
             log_seq: 0,
             net_seq: 0,
+            comp: Tree::default(),
         }
     }
 }
@@ -319,6 +323,7 @@ enum Tab {
     Logs,
     Network,
     Perf,
+    Components,
 }
 
 #[derive(PartialEq)]
@@ -334,7 +339,7 @@ pub struct RnView {
     active: Option<String>,
     name_filter: Option<String>,
     tab: Tab,
-    sel: [usize; 3],
+    sel: [usize; 4],
     follow: bool,
     detail: bool,
     maximized: bool,
@@ -359,6 +364,9 @@ pub struct RnView {
     visual: Option<usize>,
     detail_cursor: usize, // current line in the maximized preview
     root: Option<String>, // project root, to resolve relative stack-frame paths
+    /// React DevTools bridge messages waiting to go to an app: (device, event, payload).
+    devtools_out: Vec<(String, String, serde_json::Value)>,
+    devtools_request: i64, // inspectElement request ids
 }
 
 impl RnView {
@@ -369,7 +377,7 @@ impl RnView {
             active: None,
             name_filter: name.map(|s| s.to_lowercase()),
             tab: Tab::Logs,
-            sel: [0, 0, 0],
+            sel: [0, 0, 0, 0],
             follow: true,
             detail: false,
             maximized: false,
@@ -392,6 +400,8 @@ impl RnView {
             visual: None,
             detail_cursor: 0,
             root: None,
+            devtools_out: Vec::new(),
+            devtools_request: 0,
         }
     }
 
@@ -401,8 +411,13 @@ impl RnView {
         self.root = root;
     }
 
+    /// Whether the list sticks to its newest row (never in the component tree).
+    fn following(&self) -> bool {
+        self.follow && self.tab != Tab::Components
+    }
+
     fn eff_sel(&self, len: usize) -> usize {
-        if self.follow {
+        if self.following() {
             len.saturating_sub(1)
         } else {
             self.sel[self.tab_idx()].min(len.saturating_sub(1))
@@ -599,7 +614,13 @@ impl RnView {
 
     /// Returns true to quit.
     pub fn on_key(&mut self, key: KeyEvent, client: &RnClient) -> bool {
-        handle_key(self, key, client)
+        let filter = self.filter.clone();
+        let quit = handle_key(self, key, client);
+        if self.filter != filter {
+            self.anchor_comp_cursor(); // keep the selection when it's still shown
+        }
+        self.sync_comp_selection();
+        quit
     }
 
     fn tab_idx(&self) -> usize {
@@ -607,6 +628,7 @@ impl RnView {
             Tab::Logs => 0,
             Tab::Network => 1,
             Tab::Perf => 2,
+            Tab::Components => 3,
         }
     }
 
@@ -636,6 +658,11 @@ impl RnView {
             RnEvent::Status(key, s) => {
                 let clear = self.clear_on_restart;
                 let d = self.dev(&key);
+                // A new connection hasn't been attached to the backend yet.
+                if s != d.status {
+                    d.comp.reset();
+                    d.comp.attached = false;
+                }
                 if s == Status::Disconnected {
                     d.was_disconnected = true;
                     d.paused = None; // a gone VM can't still be suspended
@@ -684,6 +711,7 @@ impl RnView {
             // first one on a connection means the same. Fast Refresh keeps the
             // context, so it doesn't clear.
             RnEvent::ContextCleared(key) => {
+                self.dev(&key).comp.reset(); // the backend sends a new tree
                 if self.clear_on_restart {
                     self.dev(&key).clear();
                 }
@@ -696,6 +724,7 @@ impl RnView {
                 }
                 d.has_context = true;
             }
+            RnEvent::Devtools(key, event, payload) => self.on_devtools(&key, &event, payload),
             RnEvent::Perf(key, s) => {
                 let d = self.dev(&key);
                 if let Some(f) = s.fps {
@@ -748,6 +777,12 @@ impl RnView {
                     .collect()
             }
             Tab::Perf => Vec::new(),
+            Tab::Components => d
+                .comp
+                .rows_shifted(&self.filter, self.comp_shift(&d.comp))
+                .into_iter()
+                .map(|r| (r.text, false, "comp".into()))
+                .collect(),
         }
     }
 
@@ -799,7 +834,255 @@ impl RnView {
                     .unwrap_or_default()
             }
             Tab::Perf => Vec::new(),
+            Tab::Components => d.comp.detail_lines(),
         }
+    }
+
+    // ── Components tab ──
+
+    /// How many levels the tree is shifted left, so the cursor's row stays
+    /// readable: it's never indented more than a third of the pane.
+    fn comp_shift(&self, t: &Tree) -> usize {
+        let room = (self.detail_width.max(30) / 3).max(8);
+        let rows = t.rows(&self.filter);
+        rows.get(self.sel[3].min(rows.len().saturating_sub(1)))
+            .map_or(0, |r| r.depth.saturating_sub(room))
+    }
+
+    fn active_tree(&self) -> Option<&Tree> {
+        self.devices.get(self.active.as_ref()?).map(|d| &d.comp)
+    }
+
+    fn active_tree_mut(&mut self) -> Option<&mut Tree> {
+        let key = self.active.clone()?;
+        self.devices.get_mut(&key).map(|d| &mut d.comp)
+    }
+
+    /// The component at the cursor becomes the selected (inspected) one.
+    fn sync_comp_selection(&mut self) {
+        if self.tab != Tab::Components {
+            return;
+        }
+        let filter = self.filter.clone();
+        let sel = self.sel[3];
+        if let Some(t) = self.active_tree_mut() {
+            let rows = t.rows(&filter);
+            t.selected = rows
+                .get(sel.min(rows.len().saturating_sub(1)))
+                .map(|r| r.id);
+        }
+    }
+
+    /// Keep the cursor on the selected component when the tree changes.
+    fn anchor_comp_cursor(&mut self) {
+        let filter = self.filter.clone();
+        let Some(t) = self.active_tree() else {
+            return;
+        };
+        let Some(id) = t.selected else {
+            return;
+        };
+        if let Some(i) = t.rows(&filter).iter().position(|r| r.id == id) {
+            self.sel[3] = i;
+        }
+    }
+
+    fn on_devtools(&mut self, key: &str, event: &str, payload: serde_json::Value) {
+        let active = self.active.as_deref() == Some(key);
+        let filter = self.filter.clone();
+        let t = &mut self.dev(key).comp;
+        match event {
+            "operations" => {
+                let ops: Vec<i64> = payload
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_i64()).collect())
+                    .unwrap_or_default();
+                if let Err(e) = t.apply(&ops) {
+                    t.error = Some(e);
+                }
+            }
+            "selectElement" => {
+                if let Some(id) = payload.as_i64() {
+                    t.reveal(id);
+                    let hidden = !t.rows(&filter).iter().any(|r| r.id == id);
+                    if active && hidden {
+                        self.filter.clear();
+                    }
+                    let t = &mut self.dev(key).comp;
+                    if t.picking {
+                        t.picking = false;
+                        let msg = (
+                            key.to_string(),
+                            "stopInspectingHost".into(),
+                            serde_json::json!(false),
+                        );
+                        self.devtools_out.push(msg);
+                    }
+                    if active {
+                        self.flash = Some("selected the tapped component".into());
+                    }
+                }
+            }
+            "stopInspectingHost" => t.picking = false,
+            "inspectedElement" => t.on_inspected(&payload),
+            "signalbox:unavailable" => t.unavailable = payload.as_str().map(String::from),
+            _ => {}
+        }
+        if active {
+            self.anchor_comp_cursor();
+        }
+    }
+
+    /// Talk to the apps' React DevTools backends: attach the active app while
+    /// the Components tab is open (detaching otherwise, so React Native
+    /// DevTools can have it), and send what the tab needs. Call once per frame.
+    pub fn tick(&mut self, client: &RnClient) {
+        let want = (self.tab == Tab::Components)
+            .then(|| self.active.clone())
+            .flatten();
+        let keys: Vec<String> = self.devices.keys().cloned().collect();
+        for key in keys {
+            let d = self.devices.get_mut(&key).unwrap();
+            let wanted = want.as_deref() == Some(key.as_str());
+            if d.comp.attached && !wanted {
+                if d.comp.picking {
+                    client.send(
+                        &key,
+                        devtools_msg("stopInspectingHost", serde_json::json!(false)),
+                    );
+                }
+                client.send(&key, ConnCmd::DevtoolsDetach);
+                d.comp.reset();
+                d.comp.attached = false;
+            } else if wanted && !d.comp.attached && d.status == Status::Connected {
+                d.comp.reset();
+                d.comp.unavailable = None;
+                d.comp.error = None;
+                d.comp.attached = true;
+                client.send(&key, ConnCmd::DevtoolsAttach);
+            }
+        }
+        for (key, event, payload) in self.devtools_out.drain(..) {
+            client.send(&key, devtools_msg(&event, payload));
+        }
+        let Some(key) = want else {
+            return;
+        };
+        // A fresh tree (attach, reload): inspect what the cursor is on.
+        if self
+            .active_tree()
+            .is_some_and(|t| t.attached && t.selected.is_none())
+        {
+            self.sync_comp_selection();
+        }
+        let Some(t) = self.devices.get_mut(&key).map(|d| &mut d.comp) else {
+            return;
+        };
+        if !t.attached {
+            return;
+        }
+        while let Some(r) = t.next_request() {
+            self.devtools_request += 1;
+            if r.force {
+                // Outline it on the device, like hovering it in React DevTools.
+                client.send(
+                    &key,
+                    devtools_msg(
+                        "highlightHostInstance",
+                        serde_json::json!({
+                            "id": r.id, "rendererID": r.renderer,
+                            "displayName": t.name(r.id), "hideAfterTimeout": true,
+                            "openBuiltinElementsPanel": false, "scrollIntoView": false,
+                        }),
+                    ),
+                );
+            }
+            client.send(
+                &key,
+                devtools_msg(
+                    "inspectElement",
+                    serde_json::json!({
+                        "id": r.id, "rendererID": r.renderer, "requestID": self.devtools_request,
+                        "path": r.path, "forceFullData": r.force,
+                    }),
+                ),
+            );
+        }
+    }
+
+    /// `s`: select a component by tapping it in the app (again to cancel).
+    fn toggle_picking(&mut self) {
+        let Some(key) = self.active.clone() else {
+            return;
+        };
+        let Some(t) = self.active_tree_mut() else {
+            return;
+        };
+        if !t.attached || t.unavailable.is_some() {
+            return;
+        }
+        t.picking = !t.picking;
+        let (event, flash) = if t.picking {
+            (
+                "startInspectingHost",
+                "tap a component in the app (s cancels)",
+            )
+        } else {
+            ("stopInspectingHost", "stopped selecting in the app")
+        };
+        let payload = if t.picking {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(false)
+        };
+        self.devtools_out.push((key, event.into(), payload));
+        self.flash = Some(flash.into());
+    }
+
+    /// `h`/`l`/`u` in the tree. Returns whether the key was one of them.
+    fn tree_key(&mut self, code: KeyCode) -> bool {
+        let Some(t) = self.active_tree_mut() else {
+            return false;
+        };
+        let Some(id) = t.selected else {
+            return matches!(
+                code,
+                KeyCode::Char('h' | 'l' | 'u') | KeyCode::Left | KeyCode::Right
+            );
+        };
+        let target = match code {
+            // Fold, or go to the parent of what's already folded (or a leaf).
+            KeyCode::Char('h') | KeyCode::Left => {
+                if t.has_children(id) && !t.is_collapsed(id) {
+                    t.set_collapsed(id, true);
+                    None
+                } else {
+                    t.parent(id)
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if t.is_collapsed(id) {
+                    t.set_collapsed(id, false);
+                    None
+                } else {
+                    t.first_child(id)
+                }
+            }
+            KeyCode::Char('u') => t.parent(id),
+            _ => return false,
+        };
+        if let Some(target) = target {
+            t.reveal(target);
+        }
+        self.anchor_comp_cursor();
+        true
+    }
+}
+
+fn devtools_msg(event: &str, payload: serde_json::Value) -> ConnCmd {
+    ConnCmd::Devtools {
+        event: event.into(),
+        payload,
     }
 }
 
@@ -992,10 +1275,11 @@ fn render_view(view: &mut RnView, frame: &mut Frame, area: Rect) {
             }
         };
         format!(
-            "{} {} {}",
+            "{} {} {} {}",
             lbl(Tab::Logs, format!("Logs ({logs_n})")),
             lbl(Tab::Network, format!("Network ({net_n})")),
-            lbl(Tab::Perf, "Perf".into())
+            lbl(Tab::Perf, "Perf".into()),
+            lbl(Tab::Components, "Components".into())
         )
     };
     let restart = if view.clear_on_restart {
@@ -1037,7 +1321,11 @@ fn render_view(view: &mut RnView, frame: &mut Frame, area: Rect) {
         // Autoscroll state (space toggles it, like every scrollable list).
         None => format!(
             " {who} · {status}{meta_str}{filter_str}{net_filters} · {restart}{}   {tabbar}",
-            if view.follow { "" } else { " · paused" }
+            if view.follow || view.tab == Tab::Components {
+                ""
+            } else {
+                " · paused"
+            }
         ),
     };
     let head_style = if paused.is_some() {
@@ -1097,6 +1385,25 @@ fn render_body(view: &RnView, cols: usize, h: usize, d: Option<&Device>) -> Vec<
     }
     let rows = view.rows();
     let len = rows.len();
+    if view.tab == Tab::Components && len == 0 {
+        let t = d.map(|d| &d.comp);
+        let msg = match t {
+            None => " No app connected to Metro.".to_string(),
+            Some(t) if t.unavailable.is_some() => format!(" {}.", t.unavailable.as_deref().unwrap_or("")),
+            Some(t) if t.error.is_some() => format!(
+                " Couldn't read the component tree ({}); this React DevTools version may be unsupported.",
+                t.error.as_deref().unwrap_or("")
+            ),
+            Some(_) if !view.filter.is_empty() => " No component matches the filter.".to_string(),
+            Some(t) if t.attached => " Waiting for the component tree…".to_string(),
+            Some(_) => " Connecting to the app's React DevTools…".to_string(),
+        };
+        let mut out = vec![Line::styled(msg, Style::default().fg(Color::Yellow))];
+        while out.len() < h {
+            out.push(Line::raw(""));
+        }
+        return out;
+    }
     if view.tab == Tab::Network
         && d.map(|d| !d.network_supported && d.net.is_empty())
             .unwrap_or(false)
@@ -1110,11 +1417,7 @@ fn render_body(view: &RnView, cols: usize, h: usize, d: Option<&Device>) -> Vec<
         }
         return out;
     }
-    let eff_sel = if view.follow {
-        len.saturating_sub(1)
-    } else {
-        view.sel[view.tab_idx()].min(len.saturating_sub(1))
-    };
+    let eff_sel = view.eff_sel(len);
     // Visual-select range over list rows — only when the list is the active
     // cursor (no detail panel). With a panel open, visual targets the panel.
     let list_vis = if view.detail {
@@ -1199,7 +1502,7 @@ fn render_body(view: &RnView, cols: usize, h: usize, d: Option<&Device>) -> Vec<
     }
 
     // full list
-    let start = if view.follow {
+    let start = if view.following() {
         len.saturating_sub(h)
     } else {
         eff_sel.saturating_sub(h / 2).min(len.saturating_sub(h))
@@ -1253,6 +1556,19 @@ fn footer(view: &RnView, is_logs: bool) -> String {
             }
             if view.tab == Tab::Perf {
                 return format!("{devs} live JS FPS + heap{reload}{quit}");
+            }
+            if view.tab == Tab::Components {
+                let picking = view.active_tree().is_some_and(|t| t.picking);
+                if picking {
+                    return " tap a component in the app · s cancel".into();
+                }
+                let pane = if view.detail {
+                    let z = if view.maximized { "z split" } else { "z max" };
+                    format!("⏎ close · {z} · {{}} sect · o nvim")
+                } else {
+                    "⏎ inspect".into()
+                };
+                return format!("{devs} s select in app · h/l fold · u parent · {pane} · / search · f filter{reload}{quit}");
             }
             if view.detail {
                 let nn = if view.search.is_empty() {
@@ -1763,6 +2079,24 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
     }
 
     view.flash = None;
+    if view.tab == Tab::Components && !(view.detail && view.maximized) {
+        match key.code {
+            KeyCode::Char('s') => {
+                return {
+                    view.toggle_picking();
+                    false
+                }
+            }
+            // The tree has nothing to clear or follow.
+            KeyCode::Char('c' | 'a' | ' ' | 'p')
+                if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                return false
+            }
+            code if view.tree_key(code) => return false,
+            _ => {}
+        }
+    }
     let n = view.rows().len();
     let ti = view.tab_idx();
     let h = 20usize; // page size approximation for PgUp/PgDn
@@ -1786,9 +2120,10 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
         }
         KeyCode::Char('[') => {
             view.tab = match view.tab {
-                Tab::Logs => Tab::Perf,
+                Tab::Logs => Tab::Components,
                 Tab::Network => Tab::Logs,
                 Tab::Perf => Tab::Network,
+                Tab::Components => Tab::Perf,
             };
             view.detail = false;
             view.maximized = false;
@@ -1798,7 +2133,8 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             view.tab = match view.tab {
                 Tab::Logs => Tab::Network,
                 Tab::Network => Tab::Perf,
-                Tab::Perf => Tab::Logs,
+                Tab::Perf => Tab::Components,
+                Tab::Components => Tab::Logs,
             };
             view.detail = false;
             view.maximized = false;
@@ -1960,7 +2296,7 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             } else {
                 // Start from the row actually shown (the bottom while following),
                 // not the stale sel=0, so the first `k` steps up by one.
-                let cur = if view.follow {
+                let cur = if view.following() {
                     n.saturating_sub(1)
                 } else {
                     view.sel[ti]
@@ -1977,7 +2313,7 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
                 keep_cursor_visible(view);
                 view.detail_hit = None;
             } else {
-                let cur = if view.follow {
+                let cur = if view.following() {
                     n.saturating_sub(1)
                 } else {
                     view.sel[ti]
@@ -1989,7 +2325,7 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             }
         }
         KeyCode::PageUp => {
-            let cur = if view.follow {
+            let cur = if view.following() {
                 n.saturating_sub(1)
             } else {
                 view.sel[ti]
@@ -1998,7 +2334,7 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
             view.sel[ti] = cur.saturating_sub(h);
         }
         KeyCode::PageDown => {
-            let cur = if view.follow {
+            let cur = if view.following() {
                 n.saturating_sub(1)
             } else {
                 view.sel[ti]
@@ -2041,4 +2377,283 @@ fn copy_to_clipboard(text: &str) -> bool {
         return child.wait().map(|s| s.success()).unwrap_or(false);
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::mpsc::Receiver;
+
+    const APP: &str = "iPhone 16";
+
+    /// `operations` for Root 1 › App 2 › (Header 3, List 4 › Item 5, Item 6).
+    fn tree_ops() -> serde_json::Value {
+        let mut ops = vec![1, 1];
+        let names = ["App", "Header", "List", "Item"];
+        let mut table = Vec::new();
+        for n in names {
+            table.push(n.len() as i64);
+            table.extend(n.chars().map(|c| c as i64));
+        }
+        ops.push(table.len() as i64);
+        ops.extend(table);
+        ops.extend([1, 1, 11, 0, 0, 1, 1]);
+        ops.extend([1, 2, 5, 1, 0, 1, 0]);
+        ops.extend([1, 3, 5, 2, 2, 2, 0]);
+        ops.extend([1, 4, 5, 2, 2, 3, 0]);
+        ops.extend([1, 5, 5, 4, 4, 4, 0]);
+        ops.extend([1, 6, 5, 4, 4, 4, 0]);
+        json!(ops)
+    }
+
+    /// A view on the Components tab of one connected app, and what it sent.
+    fn components() -> (RnView, RnClient, Receiver<ConnCmd>) {
+        let (client, sent) = RnClient::recording(APP);
+        let mut view = RnView::new(None);
+        view.on_event(RnEvent::Targets(vec![TargetInfo {
+            key: APP.into(),
+            label: APP.into(),
+            meta: None,
+        }]));
+        view.on_event(RnEvent::Status(APP.into(), Status::Connected));
+        view.on_key(KeyEvent::from(KeyCode::Char('[')), &client); // Logs → Components
+        (view, client, sent)
+    }
+
+    fn key(view: &mut RnView, client: &RnClient, code: KeyCode) {
+        view.on_key(KeyEvent::from(code), client);
+    }
+
+    /// The bridge messages sent so far, as "event payload" strings.
+    fn messages(sent: &Receiver<ConnCmd>) -> Vec<String> {
+        sent.try_iter()
+            .map(|c| match c {
+                ConnCmd::DevtoolsAttach => "attach".into(),
+                ConnCmd::DevtoolsDetach => "detach".into(),
+                ConnCmd::Devtools { event, payload } => format!("{event} {payload}"),
+                _ => "other".into(),
+            })
+            .collect()
+    }
+
+    fn row_texts(view: &RnView) -> Vec<String> {
+        view.rows().into_iter().map(|r| r.0).collect()
+    }
+
+    fn selected(view: &RnView) -> Option<i64> {
+        view.active_tree().and_then(|t| t.selected)
+    }
+
+    #[test]
+    fn attaches_only_while_the_tab_is_open() {
+        let (mut view, client, sent) = components();
+        view.tick(&client);
+        view.tick(&client);
+        assert_eq!(messages(&sent), vec!["attach"]);
+        key(&mut view, &client, KeyCode::Char(']')); // back to Logs
+        view.tick(&client);
+        assert_eq!(messages(&sent), vec!["detach"]);
+        key(&mut view, &client, KeyCode::Char('['));
+        view.tick(&client);
+        assert_eq!(messages(&sent), vec!["attach"]);
+        // A reconnect drops the attachment; the next tick attaches again.
+        view.on_event(RnEvent::Status(APP.into(), Status::Disconnected));
+        view.tick(&client);
+        assert!(messages(&sent).is_empty());
+        view.on_event(RnEvent::Status(APP.into(), Status::Connected));
+        view.tick(&client);
+        assert_eq!(messages(&sent), vec!["attach"]);
+    }
+
+    #[test]
+    fn shows_the_tree_and_inspects_the_cursor() {
+        let (mut view, client, sent) = components();
+        view.tick(&client);
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "operations".into(),
+            tree_ops(),
+        ));
+        assert_eq!(
+            row_texts(&view),
+            vec!["▾ App", "   Header", " ▾ List", "    Item", "    Item"]
+        );
+        key(&mut view, &client, KeyCode::Char('j'));
+        assert_eq!(selected(&view), Some(3));
+        messages(&sent);
+        view.tick(&client);
+        let m = messages(&sent);
+        assert!(m[0].starts_with("highlightHostInstance "), "{m:?}");
+        assert!(
+            m[1].contains("\"forceFullData\":true") && m[1].contains("\"id\":3"),
+            "{m:?}"
+        );
+        key(&mut view, &client, KeyCode::Enter);
+        assert_eq!(view.detail_source(), vec!["<Header>  #3", "  inspecting…"]);
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "inspectedElement".into(),
+            json!({"id": 3, "type": "full-data", "value": {"props": {"data": {"title": "Hi"}, "cleaned": []}}}),
+        ));
+        assert_eq!(
+            view.detail_source(),
+            vec!["<Header>  #3", "── Props ──", "  title: \"Hi\""]
+        );
+    }
+
+    #[test]
+    fn folds_and_walks_the_tree() {
+        let (mut view, client, _sent) = components();
+        view.tick(&client);
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "operations".into(),
+            tree_ops(),
+        ));
+        key(&mut view, &client, KeyCode::Char('G')); // the last Item
+        assert_eq!(selected(&view), Some(6));
+        key(&mut view, &client, KeyCode::Char('u'));
+        assert_eq!(selected(&view), Some(4));
+        key(&mut view, &client, KeyCode::Char('h')); // fold List
+        assert_eq!(row_texts(&view), vec!["▾ App", "   Header", " ▸ List"]);
+        assert_eq!(selected(&view), Some(4));
+        key(&mut view, &client, KeyCode::Char('h')); // folded: up to App
+        assert_eq!(selected(&view), Some(2));
+        key(&mut view, &client, KeyCode::Char('l')); // into App's first child
+        assert_eq!(selected(&view), Some(3));
+        key(&mut view, &client, KeyCode::Char('j'));
+        key(&mut view, &client, KeyCode::Char('l')); // unfold List
+        key(&mut view, &client, KeyCode::Char('l')); // into it
+        assert_eq!(selected(&view), Some(5));
+        // The cursor stays on the selected component when the tree changes.
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "operations".into(),
+            json!([1, 1, 0, 2, 1, 3]), // Header unmounts
+        ));
+        assert_eq!(selected(&view), Some(5));
+        assert_eq!(view.eff_sel(view.rows().len()), 2);
+    }
+
+    #[test]
+    fn selects_the_component_tapped_in_the_app() {
+        let (mut view, client, sent) = components();
+        view.tick(&client);
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "operations".into(),
+            tree_ops(),
+        ));
+        key(&mut view, &client, KeyCode::Char('u')); // App
+        key(&mut view, &client, KeyCode::Char('h')); // fold it all
+        assert_eq!(row_texts(&view), vec!["▸ App"]);
+        messages(&sent);
+        key(&mut view, &client, KeyCode::Char('s'));
+        view.tick(&client);
+        assert!(messages(&sent).contains(&"startInspectingHost null".to_string()));
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "selectElement".into(),
+            json!(6),
+        ));
+        assert_eq!(selected(&view), Some(6));
+        assert_eq!(row_texts(&view).len(), 5, "its ancestors unfold");
+        assert_eq!(view.eff_sel(5), 4);
+        view.tick(&client);
+        let m = messages(&sent);
+        assert_eq!(m[0], "stopInspectingHost false");
+        assert!(m.iter().any(|m| m.contains("\"id\":6")), "{m:?}");
+    }
+
+    #[test]
+    fn a_tap_clears_a_filter_that_hides_it_and_filters_keep_the_selection() {
+        let (mut view, client, _sent) = components();
+        view.tick(&client);
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "operations".into(),
+            tree_ops(),
+        ));
+        view.filter = "header".into();
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "selectElement".into(),
+            json!(6),
+        ));
+        assert!(view.filter.is_empty());
+        assert_eq!(selected(&view), Some(6));
+        // Typing a filter that still shows the selection keeps it.
+        key(&mut view, &client, KeyCode::Char('f'));
+        for c in "item".chars() {
+            key(&mut view, &client, KeyCode::Char(c));
+        }
+        key(&mut view, &client, KeyCode::Enter);
+        assert_eq!(row_texts(&view), vec!["  Item", "  Item"]);
+        assert_eq!(selected(&view), Some(6));
+    }
+
+    #[test]
+    fn deep_trees_shift_left_to_follow_the_cursor() {
+        let (mut view, client, _sent) = components();
+        view.tick(&client);
+        // A chain 60 deep: Root 1 › C2 › C3 › … › C61.
+        let mut ops = vec![1, 1, 2, 1, 'C' as i64, 1, 1, 11, 0, 0, 1, 1];
+        for id in 2..=61 {
+            ops.extend([1, id, 5, id - 1, 0, 1, 0]);
+        }
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "operations".into(),
+            json!(ops),
+        ));
+        assert!(row_texts(&view)[0].starts_with("▾ C"));
+        key(&mut view, &client, KeyCode::Char('G'));
+        assert_eq!(selected(&view), Some(61));
+        let rows = row_texts(&view);
+        let indent = |r: &String| r.len() - r.trim_start().len();
+        // A third of the pane, plus the (blank) fold marker and its space.
+        assert_eq!(indent(rows.last().unwrap()), view.detail_width / 3 + 2);
+        assert_eq!(indent(&rows[0]), 0, "rows above the shift sit at the edge");
+    }
+
+    #[test]
+    fn says_why_there_is_no_tree() {
+        let (mut view, client, _sent) = components();
+        let body = |view: &mut RnView| {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 6)).unwrap();
+            term.draw(|f| view.render(f, f.area())).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..6)
+                .map(|y| (0..90).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(body(&mut view).contains("Connecting to the app's React DevTools"));
+        view.tick(&client);
+        assert!(body(&mut view).contains("Waiting for the component tree"));
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "signalbox:unavailable".into(),
+            json!("this app has no React DevTools backend"),
+        ));
+        assert!(body(&mut view).contains("this app has no React DevTools backend."));
+    }
+
+    #[test]
+    fn c_does_not_clear_logs_from_the_tree() {
+        let (mut view, client, _sent) = components();
+        view.on_event(RnEvent::Log(
+            APP.into(),
+            LogEntry {
+                level: "log".into(),
+                text: "kept".into(),
+                expanded: None,
+                stack: None,
+            },
+        ));
+        key(&mut view, &client, KeyCode::Char('c'));
+        assert_eq!(view.devices[APP].logs.len(), 1);
+    }
 }

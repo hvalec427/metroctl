@@ -4,6 +4,7 @@
 //! React Native log viewer; `init`/`config` manage the project registry.
 
 mod commands_rn;
+mod components;
 mod control;
 mod devinfo;
 mod devlog;

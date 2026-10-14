@@ -88,6 +88,15 @@ const HELP_RIGHT: &[KeySection] = &[
         ],
     ),
     (
+        "Components",
+        &[
+            ("s", "select by tapping it in the app"),
+            ("h l  ← →", "fold / unfold, or out / in"),
+            ("u", "parent"),
+            ("⏎", "props, state, hooks, source"),
+        ],
+    ),
+    (
         "Debugger (paused)",
         &[
             ("F5", "continue"),
