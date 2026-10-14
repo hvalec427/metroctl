@@ -6,15 +6,31 @@
 
 use crate::rn::{connect_cdp, fetch_targets};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Optional CDP wire trace. Set SIGNALBOX_CDP_DEBUG=/path/to/log to append every
-/// frame sent/received (and anything `await_result` drops) for debugging the
+/// frame sent/received for debugging the
 /// Hermes/fusebox handshake. Resolved once per process.
 static CDP_TRACE: OnceLock<Option<String>> = OnceLock::new();
+
+thread_local! {
+    /// Frames `await_result` read while waiting for a reply to its own command.
+    /// Each CDP connection has its own thread, so this is per-connection; the
+    /// read loops drain it before touching the socket so no event is lost.
+    static BACKLOG: RefCell<VecDeque<String>> = RefCell::new(VecDeque::new());
+}
+
+/// Next frame for this connection: a backlogged one first, else the socket.
+fn next_frame(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>) -> tungstenite::Result<tungstenite::Message> {
+    match BACKLOG.with(|b| b.borrow_mut().pop_front()) {
+        Some(t) => Ok(tungstenite::Message::Text(t)),
+        None => socket.read(),
+    }
+}
 
 fn cdp_trace(tag: &str, msg: &str) {
     let path = CDP_TRACE.get_or_init(|| crate::rnconfig::env("CDP_DEBUG"));
@@ -307,7 +323,7 @@ fn conn_loop(key: &str, url: &str, port: u16, tx: &Sender<RnEvent>, crx: Receive
                 }
             }
         }
-        match socket.read() {
+        match next_frame(&mut socket) {
             Ok(tungstenite::Message::Text(t)) => {
                 cdp_trace("<<", &t);
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
@@ -369,7 +385,7 @@ fn request_response(
     debug_sink: &DebugSink,
 ) -> Option<Value> {
     for _ in 0..50 {
-        match socket.read() {
+        match next_frame(socket) {
             Ok(tungstenite::Message::Text(t)) => {
                 cdp_trace("<<", &t);
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
@@ -737,9 +753,8 @@ fn await_result(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTl
                         return v.get("result").cloned();
                     }
                 }
-                // Non-matching frame read mid-request is silently discarded here —
-                // trace it so we can see if a Debugger.paused gets eaten.
-                cdp_trace("DROP", &t);
+                // Some other event arrived mid-request; keep it for the read loop.
+                BACKLOG.with(|b| b.borrow_mut().push_back(t));
             }
             Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
             _ => return None,
