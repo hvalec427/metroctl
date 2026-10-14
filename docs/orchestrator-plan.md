@@ -104,9 +104,11 @@ back from the processes.
 - `.mcp.json` in the worktree runs `signalbox mcp`, a stdio MCP server. It
   finds the running signalbox through `.signalbox/session.json` and talks to it
   over the control socket.
-- Tools: `status`, `logs(level, filter, since)`, `errors`,
-  `network(failed_only, filter)`, `reload`, `rebuild`, `restart_metro`,
-  `screenshot`, `open_deeplink`. Later: tap/type through Maestro or idb.
+- Tools: `status`, `wait_ready`, `logs(level, filter, since)`, `errors`,
+  `network(failed_only, filter)`, `request`, `output`, `reload`, `rebuild`,
+  `restart_metro`, `deeplinks`. The screen (screenshots, taps, typing,
+  opening deep links) is [boop](https://github.com/hvalec427/boop)'s job, see
+  below.
 - Outputs are compact and filtered so they don't fill the agent's context.
 
 ## signalbox changes (do first, all optional for standalone use)
@@ -117,10 +119,13 @@ back from the processes.
 2. **`signalbox up`**, the dashboard plus startup flags:
    - `--port <n|auto>`: override `metro.port` (and therefore `RCT_METRO_PORT`).
      `auto` picks the first free port starting at 8081.
-   - `--device <udid>`: preselect and pin to that device.
-   - `--sim new[=<name>]`: create a simulator (simon `create_simulator`, using
-     the newest runtime and a default iPhone, both overridable), boot it, and
-     pin to it. Name it `signalbox-<dir>`.
+   - `--device <id>`: preselect and pin to that device (iOS udid, AVD name,
+     adb serial, or a name only one device has).
+   - `--new-sim [<name>]`: create a simulator (cloned from a settled template,
+     using the newest runtime and a default iPhone, both overridable), boot
+     it, and pin to it. Name it `signalbox-<dir>`.
+   - `--new-emulator [<avd>]`: the Android counterpart. Start a read-only
+     instance of the AVD on a free console port and pin to it.
    - `--install`: run `install_command()` first. orc copies dependencies
      instead, so it doesn't pass this.
    - Once set up: start Metro, then build onto the pinned device after it has
@@ -128,9 +133,9 @@ back from the processes.
 3. **Session file:** write `.signalbox/session.json` (pid, project root, port,
    udid, created_sim, socket path, status) and remove it on exit. Ignore it
    through `.git/info/exclude`, so the project's `.gitignore` isn't touched.
-4. **Simulator cleanup:** on quit, delete a simulator signalbox created
-   (`--sim-cleanup=delete|keep|ask`, default ask). Add `signalbox down` to stop
-   it from outside.
+4. **Simulator cleanup:** on quit, delete a simulator signalbox created, or
+   stop an emulator it started (`--sim-cleanup=delete|keep|ask`, default ask).
+   Add `signalbox down` to stop it from outside.
 5. **Control socket:** a Unix socket at `.signalbox/control.sock` that speaks
    JSON lines. It serves status, logs, errors and network from the dashboard's
    in-memory buffers, plus reload, rebuild and restart_metro.
@@ -141,8 +146,8 @@ for the app on the simulator after every successful iOS simulator build, and
 relaunches the app if the setting changed. This needs `ios.bundleId` in the
 config.
 
-6. **`signalbox mcp`:** a stdio MCP server that forwards to the control socket,
-   plus `screenshot` (`xcrun simctl io <udid> screenshot`).
+6. **`signalbox mcp`:** a stdio MCP server that forwards to the control socket.
+   (It served `screenshot` at first; that moved to boop.)
 
 Plain `signalbox` with no flags behaves exactly as it does today.
 
@@ -166,9 +171,9 @@ it. No Maestro.
 - Tapping by id or label resolves through the tree, so agents use testIDs
   instead of guessing coordinates. Coordinates are in points, the same space
   `ui` reports.
-- The session's pinned device decides the backend. Sessions on real devices
-  and Android need `--device` pinning to cover those (today `up` only creates
-  iOS simulators).
+- The session's pinned device decides the backend. Real devices need
+  `--device` pinning; for Android emulators `up --new-emulator` starts one per
+  session.
 - WebDriverAgent for all of iOS: one backend for simulators and devices,
   the same thing Maestro runs underneath (an XCTest runner), without
   Maestro's JVM/YAML layer. AXe is the no-setup fallback on simulators

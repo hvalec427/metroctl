@@ -205,6 +205,7 @@ simulator, so several checkouts (e.g. git worktrees) can run side by side:
 
 ```sh
 signalbox up --port auto --new-sim     # free port, new simulator, Metro, build
+signalbox up --port auto --new-emulator  # the same on a throwaway Android emulator
 signalbox up --port 8090 --device <id>   # iOS udid, AVD name, adb serial, or a unique name
 signalbox down                         # from another shell: stop it, delete its simulator
 ```
@@ -218,6 +219,11 @@ signalbox down                         # from another shell: stop it, delete its
   because a freshly created simulator takes minutes before it can launch apps. Override them with
   `--sim-type "iPhone 16 Pro"` / `--sim-runtime 18.2`. On quit, signalbox asks
   whether to delete it (`--sim-cleanup ask|delete|keep`).
+- `--new-emulator [AVD]` starts a read-only instance of an AVD (the only one
+  there is, unless you name it) on a free console port, and waits for it to
+  boot. Read-only instances run next to each other and drop what they write
+  when they stop, so each session gets a clean emulator and nothing to delete.
+  On quit, signalbox asks whether to stop it (`--sim-cleanup` as above).
 - `--install` installs JS deps and pods first.
 - `--prebuilt` skips the native build: it installs the app the main checkout
   last built (newest matching bundle id in Xcode's DerivedData) and points it at
@@ -232,8 +238,9 @@ signalbox down                         # from another shell: stop it, delete its
   udid, status), which is git-excluded.
 
 - Sessions that die without cleaning up (killed, crashed) are reaped the
-  next time `up` runs, or with `signalbox gc`: their simulator is deleted if
-  signalbox created it, otherwise the app is stopped and its port setting reset.
+  next time `up` runs, or with `signalbox gc`: the simulator they created is
+  deleted (an emulator they started is stopped), otherwise the app is stopped
+  and its port setting reset.
   `gc --sims` also deletes `signalbox-*` simulators no running session owns.
 
 ## Agents (`signalbox mcp`)
