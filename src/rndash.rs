@@ -1399,12 +1399,14 @@ impl DashApp {
     }
 }
 
-/// Quick-pick key for item `i`: 1-9, then a-z once the digits run out.
+/// Quick-pick key for item `i`: 1-9, then a-z, then A-Z once those run out.
 fn picker_char(i: usize) -> Option<char> {
     if i < 9 {
         Some((b'1' + i as u8) as char)
     } else if i < 9 + 26 {
         Some((b'a' + (i - 9) as u8) as char)
+    } else if i < 9 + 26 + 26 {
+        Some((b'A' + (i - 9 - 26) as u8) as char)
     } else {
         None
     }
@@ -1415,6 +1417,7 @@ fn picker_index(c: char) -> Option<usize> {
     match c {
         '1'..='9' => Some(c as usize - '1' as usize),
         'a'..='z' => Some(9 + (c as usize - 'a' as usize)),
+        'A'..='Z' => Some(9 + 26 + (c as usize - 'A' as usize)),
         _ => None,
     }
 }
