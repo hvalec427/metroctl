@@ -183,7 +183,7 @@ Each pane owns its own keys (shown in that pane's footer); only a few are global
 | `⏎` | install & run the app on it — targets *that* device (iOS `--udid`, Android `--deviceId`); an offline sim/emulator is launched first |
 | `b` / `s` | start (boot) / stop (shut down) the selected simulator or emulator |
 | `o` | launch the app on the device by its `bundleId` |
-| `l` | pop up the `deeplinks` picker; press the number/letter beside a link to open it on the device (a form asks for its placeholders), or `/` to paste any URL, e.g. a magic login link |
+| `l` | pop up the `deeplinks` picker; press the number/letter beside a link to open it on the device (a form asks for its placeholders), `/` to search the links by name or URL, or `:` to paste any URL, e.g. a magic login link |
 
 Each pane's keys show in its own footer, and only the focused pane's footer is lit
 — the others go dark so there's no clutter.

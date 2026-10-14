@@ -129,6 +129,7 @@ pub struct DashApp {
     h_split: u16, // % width of the processes pane vs devices
     confirm_quit: bool,
     link_picker: bool, // deep-link quick-picker overlay
+    link_search: Option<(String, usize)>, // `/` in the picker: filter query and selected match
     link_form: Option<LinkForm>, // values for a picked link's placeholders, or a pasted URL
     link_values: HashMap<String, String>, // last value per placeholder name, prefilled next time
     help: Option<u16>, // `?` key-reference popup, with its scroll offset
@@ -388,6 +389,7 @@ impl DashApp {
             h_split: 60,
             confirm_quit: false,
             link_picker: false,
+            link_search: None,
             link_form: None,
             link_values: HashMap::new(),
             help: None,
@@ -1257,10 +1259,45 @@ impl DashApp {
             return;
         }
 
+        if self.link_picker && self.link_search.is_some() {
+            let matches = link_matches(&self.project.deeplinks, &self.link_search.as_ref().unwrap().0);
+            let (query, sel) = self.link_search.as_mut().unwrap();
+            match key.code {
+                KeyCode::Esc => self.link_search = None,
+                _ if ctrl_c => self.link_search = None,
+                KeyCode::Down | KeyCode::Tab => *sel = (*sel + 1).min(matches.len().saturating_sub(1)),
+                KeyCode::Up | KeyCode::BackTab => *sel = sel.saturating_sub(1),
+                KeyCode::Backspace if query.is_empty() => self.link_search = None,
+                KeyCode::Backspace => {
+                    query.pop();
+                    *sel = 0;
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    query.clear();
+                    *sel = 0;
+                }
+                KeyCode::Enter => {
+                    if let Some(&i) = matches.get(*sel) {
+                        self.link_search = None;
+                        self.link_picker = false;
+                        self.open_deeplink(i);
+                    }
+                }
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    *sel = 0;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.link_picker {
             if key.code == KeyCode::Esc {
                 self.link_picker = false;
             } else if key.code == KeyCode::Char('/') {
+                self.link_search = Some((String::new(), 0));
+            } else if key.code == KeyCode::Char(':') {
                 // Any URL, e.g. a magic login link pasted from an email.
                 self.link_picker = false;
                 self.link_form = Some(LinkForm { title: "Open a URL".into(), template: String::new(), values: vec![("url".into(), String::new())], field: 0 });
@@ -1412,6 +1449,17 @@ fn picker_char(i: usize) -> Option<char> {
     }
 }
 
+/// Indexes of the deep links whose name or URL contains `query` (any case).
+fn link_matches(links: &[crate::rnconfig::DeepLink], query: &str) -> Vec<usize> {
+    let q = query.to_lowercase();
+    links
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.label().to_lowercase().contains(&q) || d.url().to_lowercase().contains(&q))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Inverse of `picker_char`.
 fn picker_index(c: char) -> Option<usize> {
     match c {
@@ -1516,30 +1564,46 @@ fn render_link_form(form: &LinkForm, frame: &mut Frame, area: Rect) {
 
 fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
     let links = &app.project.deeplinks;
-    let h = (links.len() as u16 + 4).clamp(4, area.height);
+    let search = app.link_search.as_ref();
+    let shown: Vec<usize> = match search {
+        Some((q, _)) => link_matches(links, q),
+        None => (0..links.len()).filter(|&i| picker_char(i).is_some()).collect(),
+    };
+    let h = (shown.len() as u16 + 4 + if search.is_some() { 2 } else { 0 }).clamp(6, area.height);
     let r = centered(area, 64, h);
     frame.render_widget(Clear, r);
     let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(" Deep links · esc ");
     let inner = block.inner(r);
     frame.render_widget(block, r);
-    let mut lines: Vec<Line> = links
-        .iter()
-        .enumerate()
-        .filter_map(|(i, d)| {
-            picker_char(i).map(|k| {
-                Line::from(vec![
-                    Span::styled(format!(" {k} "), Style::default().fg(Color::Black).bg(Color::Cyan)),
-                    Span::raw(format!("  {}", d.label())),
-                    Span::styled(
-                        crate::rnconfig::link_placeholders(d.url()).iter().map(|p| format!(" ‹{p}›")).collect::<String>(),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ])
-            })
-        })
-        .collect();
+    let key_style = Style::default().fg(Color::Black).bg(Color::Cyan);
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some((q, _)) = search {
+        lines.push(Line::from(vec![Span::styled(" / ", key_style), Span::raw(format!("  {q}█"))]));
+        lines.push(Line::raw(""));
+    }
+    for (row, &i) in shown.iter().enumerate() {
+        let d = &links[i];
+        // While searching, keys are typed into the query: ⏎ opens the highlighted match.
+        let (key, label) = match search {
+            Some((_, sel)) if *sel == row => ("  ▸".to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Some(_) => ("   ".to_string(), Style::default()),
+            None => (format!(" {} ", picker_char(i).unwrap_or(' ')), Style::default()),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(key, if search.is_some() { Style::default().fg(Color::Cyan) } else { key_style }),
+            Span::styled(format!("  {}", d.label()), label),
+            Span::styled(
+                crate::rnconfig::link_placeholders(d.url()).iter().map(|p| format!(" ‹{p}›")).collect::<String>(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![Span::styled(" / ", Style::default().fg(Color::Black).bg(Color::Cyan)), Span::raw("  paste any URL (e.g. a magic login link)")]));
+    if search.is_some() {
+        lines.push(Line::styled(" type to filter · ↑↓ select · ⏎ open · esc back", Style::default().fg(Color::DarkGray)));
+    } else {
+        lines.push(Line::from(vec![Span::styled(" / ", key_style), Span::raw("  search    "), Span::styled(" : ", key_style), Span::raw("  paste any URL (e.g. a magic login link)")]));
+    }
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
@@ -1575,7 +1639,7 @@ const HELP_LEFT: &[KeySection] = &[
         ("s", "stop it"),
         ("b", "build & run on it"),
         ("o", "open the app"),
-        ("l", "open a deep link (fills ‹placeholders›; / for any URL)"),
+        ("l", "open a deep link (fills ‹placeholders›; / search, : any URL)"),
     ]),
 ];
 
