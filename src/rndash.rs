@@ -246,7 +246,7 @@ impl DashApp {
                 if udids.is_empty() {
                     ios_details.clear();
                 } else if udids != ios_udids
-                    || ios_checked.map_or(true, |t| t.elapsed() > Duration::from_secs(15))
+                    || ios_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(15))
                 {
                     ios_details = devinfo::ios_physical();
                     ios_checked = Some(Instant::now());
@@ -1475,12 +1475,8 @@ impl DashApp {
             return;
         }
 
-        if self.link_picker && self.link_search.is_some() {
-            let matches = link_matches(
-                &self.project.deeplinks,
-                &self.link_search.as_ref().unwrap().0,
-            );
-            let (query, sel) = self.link_search.as_mut().unwrap();
+        if let (true, Some((query, sel))) = (self.link_picker, self.link_search.as_mut()) {
+            let matches = link_matches(&self.project.deeplinks, query);
             match key.code {
                 KeyCode::Esc => self.link_search = None,
                 _ if ctrl_c => self.link_search = None,

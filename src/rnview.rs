@@ -1456,8 +1456,7 @@ fn jump_section(view: &mut RnView, dir: i32) {
             .iter()
             .enumerate()
             .take(cur)
-            .filter(|(_, l)| is_header(l))
-            .last()
+            .rfind(|(_, l)| is_header(l))
             .map(|(i, _)| i)
             .or(Some(0))
     };

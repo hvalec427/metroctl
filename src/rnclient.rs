@@ -21,10 +21,11 @@ thread_local! {
     /// Frames `await_result` read while waiting for a reply to its own command.
     /// Each CDP connection has its own thread, so this is per-connection; the
     /// read loops drain it before touching the socket so no event is lost.
-    static BACKLOG: RefCell<VecDeque<String>> = RefCell::new(VecDeque::new());
+    static BACKLOG: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
 }
 
 /// Next frame for this connection: a backlogged one first, else the socket.
+#[allow(clippy::result_large_err)] // tungstenite's own error type
 fn next_frame(
     socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
 ) -> tungstenite::Result<tungstenite::Message> {
@@ -105,7 +106,6 @@ pub enum Status {
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    pub kind: String,  // console | network | system
     pub level: String, // log | warn | error | info | ...
     pub text: String,
     pub expanded: Option<Vec<String>>, // deep object tree (already fetched), if any
@@ -146,6 +146,7 @@ pub struct PerfSample {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // a channel message, moved once
 pub enum RnEvent {
     Targets(Vec<TargetInfo>),
     Status(String, Status),
@@ -190,7 +191,6 @@ pub enum ConnCmd {
 pub struct RnClient {
     pub rx: Receiver<RnEvent>,
     cmd_senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>>,
-    port: u16,
     /// Why the editor-facing DAP server isn't running, if it isn't.
     pub dap_error: Option<String>,
 }
@@ -219,7 +219,6 @@ impl RnClient {
         RnClient {
             rx,
             cmd_senders,
-            port,
             dap_error,
         }
     }
@@ -228,10 +227,6 @@ impl RnClient {
         if let Some(s) = self.cmd_senders.lock().unwrap().get(key) {
             let _ = s.send(cmd);
         }
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
     }
 }
 
@@ -537,6 +532,7 @@ fn request_response(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_message(
     key: &str,
     msg: &Value,
@@ -633,7 +629,6 @@ fn handle_message(
             let _ = tx.send(RnEvent::Log(
                 key.into(),
                 LogEntry {
-                    kind: "console".into(),
                     level,
                     text,
                     expanded,
@@ -646,7 +641,6 @@ fn handle_message(
             let _ = tx.send(RnEvent::Log(
                 key.into(),
                 LogEntry {
-                    kind: "console".into(),
                     level: e["level"].as_str().unwrap_or("log").into(),
                     text: e["text"].as_str().unwrap_or("").into(),
                     expanded: None,
@@ -672,7 +666,6 @@ fn handle_message(
             let _ = tx.send(RnEvent::Log(
                 key.into(),
                 LogEntry {
-                    kind: "console".into(),
                     level: "error".into(),
                     text,
                     expanded: None,

@@ -1,0 +1,32 @@
+name: Check
+
+on:
+  pull_request: {}
+  push:
+    # master and develop are checked by release.yml before it builds.
+    branches-ignore:
+      - master
+      - develop
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # macOS like the release build: simon and the tests shell out to its tooling.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked

@@ -47,8 +47,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref develop
 
+  # fmt, clippy and tests; nothing is released unless they pass.
+  check:
+    if: github.event_name != 'schedule'
+    uses: ./.github/workflows/check.yml
+
   release:
     if: github.event_name != 'schedule'
+    needs: check
     # macOS: binaries are built for both Apple targets and ad-hoc code-signed.
     runs-on: macos-latest
     steps:
