@@ -17,6 +17,9 @@ use std::process::{Command, Stdio};
 const MAX_LINES: usize = 5000;
 const MAX_NET: usize = 1000;
 const PERF_HISTORY: usize = 60;
+/// How long a component stays outlined on the device. React Native ignores the
+/// backend's own timeout, so the outline would otherwise stay until the next.
+const HIGHLIGHT_FOR: std::time::Duration = std::time::Duration::from_secs(2);
 const METHODS: [&str; 8] = [
     "ALL", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
 ];
@@ -367,6 +370,8 @@ pub struct RnView {
     /// React DevTools bridge messages waiting to go to an app: (device, event, payload).
     devtools_out: Vec<(String, String, serde_json::Value)>,
     devtools_request: i64, // inspectElement request ids
+    /// The device with a component outlined, and when to clear it.
+    highlight: Option<(String, std::time::Instant)>,
 }
 
 impl RnView {
@@ -402,6 +407,7 @@ impl RnView {
             root: None,
             devtools_out: Vec::new(),
             devtools_request: 0,
+            highlight: None,
         }
     }
 
@@ -940,6 +946,16 @@ impl RnView {
         let want = (self.tab == Tab::Components)
             .then(|| self.active.clone())
             .flatten();
+        // Clear the outline once it's been up for a while, or when leaving the tab.
+        if let Some((key, until)) = &self.highlight {
+            if std::time::Instant::now() >= *until || want.as_deref() != Some(key.as_str()) {
+                client.send(
+                    key,
+                    devtools_msg("clearHostInstanceHighlight", serde_json::Value::Null),
+                );
+                self.highlight = None;
+            }
+        }
         let keys: Vec<String> = self.devices.keys().cloned().collect();
         for key in keys {
             let d = self.devices.get_mut(&key).unwrap();
@@ -996,6 +1012,7 @@ impl RnView {
                         }),
                     ),
                 );
+                self.highlight = Some((key.clone(), std::time::Instant::now() + HIGHLIGHT_FOR));
             }
             client.send(
                 &key,
@@ -2655,6 +2672,37 @@ mod tests {
         key(&mut view, &client, KeyCode::Char('s'));
         view.tick(&client);
         assert!(messages(&sent).contains(&"startInspectingHost null".to_string()));
+    }
+
+    #[test]
+    fn clears_the_outline_after_a_while_and_when_leaving_the_tab() {
+        let (mut view, client, sent) = components();
+        view.tick(&client);
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "operations".into(),
+            tree_ops(),
+        ));
+        key(&mut view, &client, KeyCode::Char('j'));
+        view.tick(&client);
+        assert!(messages(&sent)
+            .iter()
+            .any(|m| m.starts_with("highlightHostInstance")));
+        view.tick(&client);
+        assert!(!messages(&sent)
+            .iter()
+            .any(|m| m.starts_with("clearHostInstanceHighlight")));
+        // Time's up.
+        view.highlight.as_mut().unwrap().1 = std::time::Instant::now();
+        view.tick(&client);
+        assert!(messages(&sent).contains(&"clearHostInstanceHighlight null".to_string()));
+        // Leaving the tab clears it right away.
+        key(&mut view, &client, KeyCode::Char('k'));
+        view.tick(&client);
+        messages(&sent);
+        key(&mut view, &client, KeyCode::Char(']'));
+        view.tick(&client);
+        assert_eq!(messages(&sent)[0], "clearHostInstanceHighlight null");
     }
 
     #[test]
