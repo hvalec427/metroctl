@@ -1546,14 +1546,16 @@ fn render_link_form(form: &LinkForm, frame: &mut Frame, area: Rect) {
     let inner = block.inner(r);
     frame.render_widget(block, r);
     let mut lines = vec![Line::raw("")];
-    let room = inner.width.saturating_sub(16) as usize;
+    // Names left-aligned in a column as wide as the longest, values lined up after it.
+    let name_w = form.values.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+    let room = inner.width.saturating_sub(name_w as u16 + 4) as usize;
     for (i, (name, value)) in form.values.iter().enumerate() {
         let active = i == form.field;
         // Long values (tokens, magic links): show the end, where typing happens.
         let chars: Vec<char> = value.chars().collect();
         let shown: String = chars[chars.len().saturating_sub(room)..].iter().collect();
         lines.push(Line::from(vec![
-            Span::styled(format!(" {name:>12} "), if active { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) }),
+            Span::styled(format!(" {name:<name_w$}  "), if active { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) }),
             Span::raw(if active { format!("{shown}█") } else { shown }),
         ]));
         lines.push(Line::raw(""));
