@@ -6,8 +6,12 @@
 //! reload/dev-menu, quit). The Metro PTY takes raw-key passthrough in input mode,
 //! so `r`/`d`/`j` and anything else Metro supports work as in a normal terminal.
 
+mod devices;
+mod links;
+mod popups;
+mod term;
+
 use crate::control;
-use crate::devinfo;
 use crate::metro_events;
 use crate::proc::PtyProcess;
 use crate::rnclient::{ConnCmd, RnClient};
@@ -16,14 +20,14 @@ use crate::rnview::RnView;
 use crate::session::{self, Pinned, SessionFile, SimCleanup};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use devices::{BootTarget, DeviceRow, OpenTarget};
+use links::{LinkAction, Links};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use serde_json::{json, Value};
-use simon::devices::{
-    get_all_installed, get_all_running, InstalledDevice, Platform, RunningDevice,
-};
+use simon::devices::Platform;
 use simon::{android, ios};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -40,75 +44,6 @@ enum Pane {
 enum DashMsg {
     Devices(Vec<DeviceRow>),
     Flash(String),
-}
-
-/// How to boot a device from the pane — physical devices are already connected,
-/// so they have no boot target.
-#[derive(Clone)]
-enum BootTarget {
-    IosSim(String),
-    Avd(String),
-}
-
-/// How to open a URL on a running device (for the configured app link).
-#[derive(Clone)]
-enum OpenTarget {
-    IosSim(String),      // simulator udid
-    IosPhysical(String), // device udid
-    AndroidSerial(String),
-}
-
-/// A row in the Devices pane: a simulator/emulator (bootable) or a connected
-/// physical device (just listed). `open` is set once the device is running;
-/// `installed`/`foreground` are populated (when a bundleId is configured) for
-/// running devices — `None` means "unknown / not checked".
-#[derive(Clone)]
-struct DeviceRow {
-    label: String,
-    id: String, // what `--device` takes: udid, AVD name or adb serial
-    platform: Platform,
-    running: bool,
-    boot: Option<BootTarget>,
-    open: Option<OpenTarget>,
-    installed: Option<bool>,
-    foreground: Option<bool>,
-    detail: Option<String>,  // OS version, API level, connection…
-    problem: Option<String>, // why it can't be used yet (unauthorized, Developer Mode off…)
-    pinned: bool,            // the device this session (`signalbox up`) builds onto
-}
-
-impl DeviceRow {
-    /// Section in the Devices pane (also the sort order).
-    fn group(&self) -> (u8, &'static str) {
-        if self.pinned {
-            return (0, "This session");
-        }
-        match (self.platform, self.boot.is_some()) {
-            (Platform::Ios, true) => (1, "iOS Simulators"),
-            (Platform::Ios, false) => (2, "iOS Devices"),
-            (Platform::Android, true) => (3, "Android Emulators"),
-            (Platform::Android, false) => (4, "Android Devices"),
-        }
-    }
-
-    /// iOS device/simulator udid (known even before boot, from the boot target).
-    fn ios_udid(&self) -> Option<String> {
-        if let Some(OpenTarget::IosSim(u)) | Some(OpenTarget::IosPhysical(u)) = &self.open {
-            return Some(u.clone());
-        }
-        if let Some(BootTarget::IosSim(u)) = &self.boot {
-            return Some(u.clone());
-        }
-        None
-    }
-
-    /// Android adb serial — only known once the device/emulator is running.
-    fn android_serial(&self) -> Option<String> {
-        match &self.open {
-            Some(OpenTarget::AndroidSerial(s)) => Some(s.clone()),
-            _ => None,
-        }
-    }
 }
 
 pub struct DashApp {
@@ -130,11 +65,8 @@ pub struct DashApp {
     v_split: u16, // % height of the top row (processes/devices) vs the logs pane
     h_split: u16, // % width of the processes pane vs devices
     confirm_quit: bool,
-    link_picker: bool,                    // deep-link quick-picker overlay
-    link_search: Option<(String, usize)>, // `/` in the picker: filter query and selected match
-    link_form: Option<LinkForm>, // values for a picked link's placeholders, or a pasted URL
-    link_values: HashMap<String, String>, // last value per placeholder name, prefilled next time
-    help: Option<u16>,           // `?` key-reference popup, with its scroll offset
+    links: Links,      // the `l` deep-link picker and its placeholder form
+    help: Option<u16>, // `?` key-reference popup, with its scroll offset
     quit: bool,
     started: Instant, // the "debugger off" notice only shows for a while after start
     pinned: Option<Pinned>, // device this session builds onto (`signalbox up`)
@@ -228,172 +160,11 @@ impl DashApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let client = RnClient::start(project.metro_port());
         // Background device poller — simctl/adb are slow, so keep them off the UI thread.
-        let dev_tx = tx.clone();
-        let android_bundle = project.android_bundle_id().map(String::from);
-        let pinned_udid = pinned.as_ref().map(|p| p.udid.clone());
-        std::thread::spawn(move || {
-            // devicectl is slow; refresh the iPhone details less often than the list.
-            let mut ios_details: HashMap<String, devinfo::IosDetail> = HashMap::new();
-            let mut ios_checked: Option<Instant> = None;
-            let mut ios_udids: Vec<String> = Vec::new();
-            loop {
-                let running_devices = get_all_running(None);
-                let udids: Vec<String> = running_devices
-                    .iter()
-                    .filter_map(|d| match d {
-                        RunningDevice::IosPhysical { udid, .. } => Some(udid.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                if udids.is_empty() {
-                    ios_details.clear();
-                } else if udids != ios_udids
-                    || ios_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(15))
-                {
-                    ios_details = devinfo::ios_physical();
-                    ios_checked = Some(Instant::now());
-                }
-                ios_udids = udids;
-                // Resolve a running emulator's adb serial from its AVD name.
-                let android_serial = |avd: &str| {
-                    running_devices.iter().find_map(|d| match d {
-                        RunningDevice::AndroidEmulator { name, serial } if name == avd => {
-                            Some(serial.clone())
-                        }
-                        _ => None,
-                    })
-                };
-                // Is the configured app installed / in the foreground? Android only —
-                // the iOS simctl probe was unreliable, so we don't check it.
-                let android_state = |serial: &str| match android_bundle.as_deref() {
-                    Some(pkg) => (
-                        Some(android::app_installed(serial, pkg)),
-                        Some(android::foreground_package(serial).as_deref() == Some(pkg)),
-                    ),
-                    None => (None, None),
-                };
-                // Installed sims/emulators (bootable; openable once running) …
-                let mut rows: Vec<DeviceRow> = Vec::new();
-                for d in get_all_installed(None) {
-                    let label = match &d {
-                        InstalledDevice::IosSim { name, runtime, .. } => {
-                            format!("{name}  {runtime}")
-                        }
-                        InstalledDevice::AndroidAvd { name, .. } => name.clone(),
-                    };
-                    let running = d.running();
-                    let row = match &d {
-                        InstalledDevice::IosSim { udid, .. } => DeviceRow {
-                            label,
-                            id: udid.clone(),
-                            platform: Platform::Ios,
-                            running,
-                            boot: Some(BootTarget::IosSim(udid.clone())),
-                            open: running.then(|| OpenTarget::IosSim(udid.clone())),
-                            installed: None, // iOS install state not probed
-                            foreground: None,
-                            detail: None, // the runtime is already in the label
-                            problem: None,
-                            pinned: false,
-                        },
-                        InstalledDevice::AndroidAvd { name, .. } => {
-                            let serial = if running { android_serial(name) } else { None };
-                            let (installed, foreground) = match &serial {
-                                Some(s) => android_state(s),
-                                None => (None, None),
-                            };
-                            let detail = serial
-                                .as_deref()
-                                .and_then(|s| devinfo::android_running(s, false))
-                                .or_else(|| devinfo::avd(name));
-                            DeviceRow {
-                                label,
-                                id: name.clone(),
-                                platform: Platform::Android,
-                                running,
-                                boot: Some(BootTarget::Avd(name.clone())),
-                                open: serial.map(OpenTarget::AndroidSerial),
-                                installed,
-                                foreground,
-                                detail,
-                                problem: None,
-                                pinned: false,
-                            }
-                        }
-                    };
-                    rows.push(row);
-                }
-                // … plus any connected physical devices (already running, not bootable).
-                for d in &running_devices {
-                    match d {
-                        RunningDevice::IosPhysical {
-                            name,
-                            udid,
-                            os_version,
-                        } => {
-                            let extra = ios_details.get(udid);
-                            rows.push(DeviceRow {
-                                label: format!("{name}  iOS {os_version}"),
-                                id: udid.clone(),
-                                platform: Platform::Ios,
-                                running: true,
-                                boot: None,
-                                open: Some(OpenTarget::IosPhysical(udid.clone())),
-                                installed: None, // devicectl app queries are slow — skip
-                                foreground: None,
-                                detail: extra.map(|e| e.text.clone()).filter(|t| !t.is_empty()),
-                                problem: extra.and_then(|e| e.problem.clone()),
-                                pinned: false,
-                            });
-                        }
-                        RunningDevice::AndroidPhysical { serial, .. } => {
-                            let (installed, foreground) = android_state(serial);
-                            rows.push(DeviceRow {
-                                label: d.name().to_string(),
-                                id: serial.clone(),
-                                platform: Platform::Android,
-                                running: true,
-                                boot: None,
-                                open: Some(OpenTarget::AndroidSerial(serial.clone())),
-                                installed,
-                                foreground,
-                                detail: devinfo::android_running(serial, true),
-                                problem: None,
-                                pinned: false,
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-                // Phones adb can see but not use yet, so they don't silently vanish.
-                for (serial, problem) in devinfo::android_unready() {
-                    rows.push(DeviceRow {
-                        label: serial.clone(),
-                        id: serial,
-                        platform: Platform::Android,
-                        running: false,
-                        boot: None,
-                        open: None,
-                        installed: None,
-                        foreground: None,
-                        detail: None,
-                        problem: Some(problem),
-                        pinned: false,
-                    });
-                }
-                for r in &mut rows {
-                    r.pinned = pinned_udid.is_some()
-                        && (r.ios_udid() == pinned_udid || r.android_serial() == pinned_udid);
-                }
-                // Group as the pane shows them: this session's device, iOS sims,
-                // iPhones, Android emulators, phones.
-                rows.sort_by_key(|r| r.group());
-                if dev_tx.send(DashMsg::Devices(rows)).is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(2500));
-            }
-        });
+        devices::spawn_poller(
+            tx.clone(),
+            project.android_bundle_id().map(String::from),
+            pinned.as_ref().map(|p| p.udid.clone()),
+        );
         let (ctl_tx, ctl_rx) = std::sync::mpsc::channel();
         let path = control::socket_path();
         let socket = control::serve(&path, ctl_tx).ok().map(|_| path);
@@ -434,10 +205,7 @@ impl DashApp {
             v_split: 45,
             h_split: 60,
             confirm_quit: false,
-            link_picker: false,
-            link_search: None,
-            link_form: None,
-            link_values: HashMap::new(),
+            links: Links::default(),
             help: None,
             quit: false,
             started: Instant::now(),
@@ -1222,39 +990,9 @@ impl DashApp {
         self.run_on_device(target, None, dev.label);
     }
 
-    /// `l` picker: open the chosen deep link on the selected (running) device.
-    /// Open configured link `idx`, asking for its placeholders' values first.
-    fn open_deeplink(&mut self, idx: usize) {
-        let Some(link) = self.project.deeplinks.get(idx) else {
-            return;
-        };
-        let names = crate::rnconfig::link_placeholders(link.url());
-        if !names.is_empty() {
-            let values = names
-                .into_iter()
-                .map(|n| {
-                    (
-                        n.clone(),
-                        self.link_values.get(&n).cloned().unwrap_or_default(),
-                    )
-                })
-                .collect();
-            self.link_form = Some(LinkForm {
-                title: link.label().to_string(),
-                template: link.url().to_string(),
-                values,
-                field: 0,
-            });
-            return;
-        }
-        self.open_url(link.url().to_string());
-    }
-
     /// Text pasted into the terminal: into the link form's current field.
     fn on_paste(&mut self, text: &str) {
-        if let Some(form) = self.link_form.as_mut() {
-            form.values[form.field].1.push_str(text.trim());
-        } else if self.input_mode {
+        if !self.links.on_paste(text) && self.input_mode {
             if let Some(p) = self.procs.get_mut(self.proc_sel) {
                 p.write_input(text.as_bytes());
             }
@@ -1445,7 +1183,6 @@ impl DashApp {
             return;
         }
 
-        // Deep-link quick-picker: a digit/letter opens that link; Esc closes.
         // Key reference popup: scrolls like any list; ?/Esc/q close it.
         if let Some(top) = self.help.as_mut() {
             match key.code {
@@ -1462,99 +1199,12 @@ impl DashApp {
             return;
         }
 
-        if let Some(form) = self.link_form.as_mut() {
-            match key.code {
-                KeyCode::Esc => self.link_form = None,
-                _ if ctrl_c => self.link_form = None,
-                KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % form.values.len(),
-                KeyCode::BackTab | KeyCode::Up => {
-                    form.field = (form.field + form.values.len() - 1) % form.values.len()
-                }
-                KeyCode::Backspace => {
-                    form.values[form.field].1.pop();
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    form.values[form.field].1.clear()
-                }
-                KeyCode::Enter if form.field + 1 < form.values.len() => form.field += 1,
-                KeyCode::Enter => {
-                    let form = self.link_form.take().unwrap();
-                    if form.values.iter().any(|(_, v)| v.trim().is_empty()) {
-                        self.set_flash("fill in every value");
-                        self.link_form = Some(form);
-                        return;
-                    }
-                    let url = if form.template.is_empty() {
-                        form.values[0].1.trim().to_string() // a pasted URL, as is
-                    } else {
-                        for (k, v) in &form.values {
-                            self.link_values.insert(k.clone(), v.clone());
-                        }
-                        crate::rnconfig::fill_link(&form.template, &form.values)
-                    };
-                    self.open_url(url);
-                }
-                KeyCode::Char(c) => form.values[form.field].1.push(c),
-                _ => {}
-            }
-            return;
-        }
-
-        if let (true, Some((query, sel))) = (self.link_picker, self.link_search.as_mut()) {
-            let matches = link_matches(&self.project.deeplinks, query);
-            match key.code {
-                KeyCode::Esc => self.link_search = None,
-                _ if ctrl_c => self.link_search = None,
-                KeyCode::Down | KeyCode::Tab => {
-                    *sel = (*sel + 1).min(matches.len().saturating_sub(1))
-                }
-                KeyCode::Up | KeyCode::BackTab => *sel = sel.saturating_sub(1),
-                KeyCode::Backspace if query.is_empty() => self.link_search = None,
-                KeyCode::Backspace => {
-                    query.pop();
-                    *sel = 0;
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    query.clear();
-                    *sel = 0;
-                }
-                KeyCode::Enter => {
-                    if let Some(&i) = matches.get(*sel) {
-                        self.link_search = None;
-                        self.link_picker = false;
-                        self.open_deeplink(i);
-                    }
-                }
-                KeyCode::Char(c) => {
-                    query.push(c);
-                    *sel = 0;
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        if self.link_picker {
-            if key.code == KeyCode::Esc {
-                self.link_picker = false;
-            } else if key.code == KeyCode::Char('/') {
-                self.link_search = Some((String::new(), 0));
-            } else if key.code == KeyCode::Char(':') {
-                // Any URL, e.g. a magic login link pasted from an email.
-                self.link_picker = false;
-                self.link_form = Some(LinkForm {
-                    title: "Open a URL".into(),
-                    template: String::new(),
-                    values: vec![("url".into(), String::new())],
-                    field: 0,
-                });
-            } else if let KeyCode::Char(c) = key.code {
-                if let Some(i) = picker_index(c) {
-                    if i < self.project.deeplinks.len() {
-                        self.link_picker = false;
-                        self.open_deeplink(i);
-                    }
-                }
+        // Deep-link picker and its form: a digit/letter opens that link; Esc closes.
+        if self.links.is_open() {
+            match self.links.on_key(key, &self.project.deeplinks) {
+                Some(LinkAction::Open(url)) => self.open_url(url),
+                Some(LinkAction::Flash(msg)) => self.set_flash(msg),
+                None => {}
             }
             return;
         }
@@ -1566,7 +1216,7 @@ impl DashApp {
                 self.input_mode = false;
                 return;
             }
-            if let Some(bytes) = key_to_bytes(key) {
+            if let Some(bytes) = term::key_to_bytes(key) {
                 if let Some(p) = self.procs.get_mut(self.proc_sel) {
                     p.write_input(&bytes);
                 }
@@ -1689,73 +1339,12 @@ impl DashApp {
                 {
                     self.set_flash("start the device first (⏎)");
                 } else {
-                    self.link_picker = true;
+                    self.links.open_picker();
                 }
             }
             _ => {}
         }
     }
-}
-
-/// Quick-pick key for item `i`: 1-9, then a-z, then A-Z once those run out.
-fn picker_char(i: usize) -> Option<char> {
-    if i < 9 {
-        Some((b'1' + i as u8) as char)
-    } else if i < 9 + 26 {
-        Some((b'a' + (i - 9) as u8) as char)
-    } else if i < 9 + 26 + 26 {
-        Some((b'A' + (i - 9 - 26) as u8) as char)
-    } else {
-        None
-    }
-}
-
-/// Indexes of the deep links whose name or URL contains `query` (any case).
-fn link_matches(links: &[crate::rnconfig::DeepLink], query: &str) -> Vec<usize> {
-    let q = query.to_lowercase();
-    links
-        .iter()
-        .enumerate()
-        .filter(|(_, d)| {
-            d.label().to_lowercase().contains(&q) || d.url().to_lowercase().contains(&q)
-        })
-        .map(|(i, _)| i)
-        .collect()
-}
-
-/// Inverse of `picker_char`.
-fn picker_index(c: char) -> Option<usize> {
-    match c {
-        '1'..='9' => Some(c as usize - '1' as usize),
-        'a'..='z' => Some(9 + (c as usize - 'a' as usize)),
-        'A'..='Z' => Some(9 + 26 + (c as usize - 'A' as usize)),
-        _ => None,
-    }
-}
-
-/// Translate a key event into the bytes a terminal would send to the child.
-fn key_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
-    let bytes = match key.code {
-        KeyCode::Char(c) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii_alphabetic() {
-                vec![(c.to_ascii_lowercase() as u8) & 0x1f]
-            } else {
-                c.to_string().into_bytes()
-            }
-        }
-        KeyCode::Enter => vec![b'\r'],
-        KeyCode::Tab => vec![b'\t'],
-        KeyCode::Backspace => vec![0x7f],
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        _ => return None,
-    };
-    Some(bytes)
 }
 
 // ── rendering ────────────────────────────────────────────────────────────────
@@ -1785,14 +1374,9 @@ fn render(app: &mut DashApp, frame: &mut Frame) {
     render_logs(app, frame, logs_outer);
     render_status(app, frame, status_area);
 
-    if app.link_picker {
-        render_link_picker(app, frame, area);
-    }
-    if let Some(form) = &app.link_form {
-        render_link_form(form, frame, area);
-    }
-    if app.help.is_some() {
-        render_help(app, frame, area);
+    app.links.render(&app.project.deeplinks, frame, area);
+    if let Some(top) = app.help.as_mut() {
+        popups::render_help(top, frame, area);
     }
     if app.confirm_quit {
         let sim = app.ask_delete_sim().then(|| {
@@ -1802,418 +1386,8 @@ fn render(app: &mut DashApp, frame: &mut Frame) {
                 .map(|d| d.label.clone())
                 .unwrap_or_else(|| "the simulator".into())
         });
-        render_quit_popup(frame, area, sim);
+        popups::render_quit_popup(frame, area, sim);
     }
-}
-
-/// Values for a link's placeholders (`template` set), or one pasted URL.
-struct LinkForm {
-    title: String,
-    template: String,
-    values: Vec<(String, String)>,
-    field: usize,
-}
-
-fn render_link_form(form: &LinkForm, frame: &mut Frame, area: Rect) {
-    let w = 76.min(area.width);
-    let h = (form.values.len() as u16 * 2 + 5).min(area.height);
-    let r = centered(area, w, h);
-    frame.render_widget(Clear, r);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(format!(" {} ", form.title));
-    let inner = block.inner(r);
-    frame.render_widget(block, r);
-    let mut lines = vec![Line::raw("")];
-    // Names left-aligned in a column as wide as the longest, values lined up after it.
-    let name_w = form
-        .values
-        .iter()
-        .map(|(n, _)| n.chars().count())
-        .max()
-        .unwrap_or(0);
-    let room = inner.width.saturating_sub(name_w as u16 + 4) as usize;
-    for (i, (name, value)) in form.values.iter().enumerate() {
-        let active = i == form.field;
-        // Long values (tokens, magic links): show the end, where typing happens.
-        let chars: Vec<char> = value.chars().collect();
-        let shown: String = chars[chars.len().saturating_sub(room)..].iter().collect();
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {name:<name_w$}  "),
-                if active {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                },
-            ),
-            Span::raw(if active { format!("{shown}█") } else { shown }),
-        ]));
-        lines.push(Line::raw(""));
-    }
-    lines.push(Line::styled(
-        " type or paste · ⇥ next · ⏎ open · esc cancel",
-        Style::default().fg(Color::DarkGray),
-    ));
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-fn render_link_picker(app: &DashApp, frame: &mut Frame, area: Rect) {
-    let links = &app.project.deeplinks;
-    let search = app.link_search.as_ref();
-    let shown: Vec<usize> = match search {
-        Some((q, _)) => link_matches(links, q),
-        None => (0..links.len())
-            .filter(|&i| picker_char(i).is_some())
-            .collect(),
-    };
-    let key_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-
-    // The list itself, with a heading above each run of links in one group.
-    let mut body: Vec<Line> = Vec::new();
-    let mut heading_rows: Vec<usize> = Vec::new();
-    let mut group: Option<&str> = None;
-    for (row, &i) in shown.iter().enumerate() {
-        let d = &links[i];
-        if d.group().is_some() && d.group() != group {
-            if !body.is_empty() {
-                body.push(Line::raw(""));
-            }
-            heading_rows.push(body.len());
-            body.push(Line::styled(
-                format!(" {}", d.group().unwrap()),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        group = d.group();
-        // While searching, keys are typed into the query: ⏎ opens the highlighted match.
-        let (key, label) = match search {
-            Some((_, sel)) if *sel == row => (
-                "  ▸".to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Some(_) => ("   ".to_string(), Style::default()),
-            None => (
-                format!(" {} ", picker_char(i).unwrap_or(' ')),
-                Style::default(),
-            ),
-        };
-        body.push(Line::from(vec![
-            Span::styled(
-                key,
-                if search.is_some() {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    key_style
-                },
-            ),
-            Span::styled(format!("  {}", d.label()), label),
-            Span::styled(
-                crate::rnconfig::link_placeholders(d.url())
-                    .iter()
-                    .map(|p| format!(" ‹{p}›"))
-                    .collect::<String>(),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    }
-
-    let mut head: Vec<Line> = Vec::new();
-    if let Some((q, _)) = search {
-        head.push(Line::from(vec![
-            Span::styled(" / ", key_style),
-            Span::raw(format!("  {q}█")),
-        ]));
-        head.push(Line::raw(""));
-    }
-    let foot: Vec<Line> = vec![
-        Line::raw(""),
-        if search.is_some() {
-            Line::styled(
-                " type to filter · ↑↓ select · ⏎ open · esc back",
-                Style::default().fg(Color::DarkGray),
-            )
-        } else {
-            Line::from(vec![
-                Span::styled(" / ", key_style),
-                Span::raw("  search    "),
-                Span::styled(" : ", key_style),
-                Span::raw("  paste any URL (e.g. a magic login link)"),
-            ])
-        },
-    ];
-
-    // Too tall for the terminal: split into two columns, at a group heading near the middle.
-    let chrome = (head.len() + foot.len() + 2) as u16;
-    let split = if body.len() as u16 + chrome > area.height && area.width >= 128 {
-        let mid = body.len().div_ceil(2);
-        let at = heading_rows
-            .iter()
-            .copied()
-            .filter(|&r| r > 0)
-            .min_by_key(|&r| r.abs_diff(mid))
-            .filter(|&r| r.abs_diff(mid) <= mid / 3)
-            .unwrap_or(mid);
-        Some(at)
-    } else {
-        None
-    };
-    let (rows, w) = match split {
-        Some(at) => (at.max(body.len() - at), 128),
-        None => (body.len(), 64),
-    };
-    let r = centered(area, w, (rows as u16 + chrome).clamp(6, area.height));
-    frame.render_widget(Clear, r);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Deep links · esc ");
-    let inner = block.inner(r);
-    frame.render_widget(block, r);
-    let [head_area, body_area, foot_area] = Layout::vertical([
-        Constraint::Length(head.len() as u16),
-        Constraint::Min(0),
-        Constraint::Length(foot.len() as u16),
-    ])
-    .areas(inner);
-    frame.render_widget(Paragraph::new(Text::from(head)), head_area);
-    frame.render_widget(Paragraph::new(Text::from(foot)), foot_area);
-    match split {
-        Some(at) => {
-            let right: Vec<Line> = body
-                .split_off(at)
-                .into_iter()
-                .skip_while(|l| l.width() == 0)
-                .collect();
-            let [left_area, right_area] =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .areas(body_area);
-            frame.render_widget(Paragraph::new(Text::from(body)), left_area);
-            frame.render_widget(Paragraph::new(Text::from(right)), right_area);
-        }
-        None => frame.render_widget(Paragraph::new(Text::from(body)), body_area),
-    }
-}
-
-type KeySection = (&'static str, &'static [(&'static str, &'static str)]);
-
-// Left / right columns of the `?` popup (stacked when the terminal is narrow).
-const HELP_LEFT: &[KeySection] = &[
-    (
-        "Global",
-        &[
-            ("⇥ / ⇧⇥", "next / previous pane"),
-            ("^←→↑↓", "resize panes"),
-            ("R", "reload the app"),
-            ("D", "open the dev menu"),
-            ("?", "this help"),
-            ("q / ^C", "quit"),
-        ],
-    ),
-    (
-        "Every pane",
-        &[
-            ("j k  ↑ ↓", "move / scroll"),
-            ("g  G", "top / bottom"),
-            ("space", "autoscroll on/off"),
-            ("[  ]", "previous / next tab"),
-        ],
-    ),
-    (
-        "Processes",
-        &[
-            ("⏎", "type into the process (Esc leaves)"),
-            ("x", "stop it"),
-            ("d", "delete a stopped tab"),
-            ("m", "start / restart Metro (takes over an external one)"),
-            ("c", "deep clean (reinstalls)"),
-            ("i", "reinstall deps + pods"),
-            ("a", "reset: deep clean, then Metro"),
-        ],
-    ),
-    (
-        "Devices",
-        &[
-            ("⏎", "start the simulator / emulator"),
-            ("s", "stop it"),
-            ("b", "build & run on it"),
-            ("o", "open the app"),
-            (
-                "l",
-                "open a deep link (fills ‹placeholders›; / search, : any URL)",
-            ),
-        ],
-    ),
-];
-
-const HELP_RIGHT: &[KeySection] = &[
-    (
-        "Logs · Network · Perf",
-        &[
-            ("1-9", "switch device"),
-            ("/  n N", "search, next / previous match"),
-            ("f", "filter"),
-            ("⏎", "open the entry"),
-            ("z", "open maximized / toggle split"),
-            ("V", "visual select, then y"),
-            ("y", "copy"),
-            ("c", "clear"),
-            ("p", "clear on reload on/off"),
-        ],
-    ),
-    (
-        "Open entry",
-        &[
-            ("⏎ / Esc", "close"),
-            ("J K", "scroll the entry (split view)"),
-            ("{  }", "previous / next section"),
-            ("o", "open file:line in nvim"),
-            ("F", "show framework stack frames"),
-        ],
-    ),
-    (
-        "Network",
-        &[
-            ("e", "errors only"),
-            ("m", "cycle method filter"),
-            ("c / C", "copy as curl"),
-        ],
-    ),
-    (
-        "Debugger (paused)",
-        &[
-            ("F5", "continue"),
-            ("F10", "step over"),
-            ("F11 / ⇧F11", "step into / out"),
-            ("F6", "pause"),
-        ],
-    ),
-];
-
-fn help_lines(sections: &[KeySection]) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    for (i, (title, keys)) in sections.iter().enumerate() {
-        if i > 0 {
-            lines.push(Line::raw(""));
-        }
-        lines.push(Line::styled(
-            format!(" {title}"),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-        for (k, desc) in keys.iter() {
-            lines.push(Line::from(vec![
-                Span::styled(format!("   {k:<12}"), Style::default().fg(Color::Yellow)),
-                Span::raw(*desc),
-            ]));
-        }
-    }
-    lines
-}
-
-fn render_help(app: &mut DashApp, frame: &mut Frame, area: Rect) {
-    let (left, right) = (help_lines(HELP_LEFT), help_lines(HELP_RIGHT));
-    let two_cols = area.width >= 110;
-    let content_h = if two_cols {
-        left.len().max(right.len())
-    } else {
-        left.len() + 1 + right.len()
-    } as u16;
-    let w = if two_cols { 120 } else { 64 };
-    let r = centered(area, w, content_h + 2);
-    frame.render_widget(Clear, r);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Keys ")
-        .title_bottom(Line::from(" ? / esc close ").right_aligned());
-    let inner = block.inner(r);
-    frame.render_widget(block, r);
-    // Clamp the scroll so G lands on the last page.
-    let top = app
-        .help
-        .unwrap_or(0)
-        .min(content_h.saturating_sub(inner.height));
-    app.help = Some(top);
-    if two_cols {
-        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(inner);
-        frame.render_widget(Paragraph::new(Text::from(left)).scroll((top, 0)), cols[0]);
-        frame.render_widget(Paragraph::new(Text::from(right)).scroll((top, 0)), cols[1]);
-    } else {
-        let mut all = left;
-        all.push(Line::raw(""));
-        all.extend(right);
-        frame.render_widget(Paragraph::new(Text::from(all)).scroll((top, 0)), inner);
-    }
-}
-
-fn centered(area: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    Rect {
-        x: area.x + (area.width - w) / 2,
-        y: area.y + (area.height - h) / 2,
-        width: w,
-        height: h,
-    }
-}
-
-fn render_quit_popup(frame: &mut Frame, area: Rect, created_sim: Option<String>) {
-    if let Some(sim) = created_sim {
-        let r = centered(area, 64, 6);
-        frame.render_widget(Clear, r);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(" Quit signalbox? ");
-        let inner = block.inner(r);
-        frame.render_widget(block, r);
-        let lines = vec![
-            Line::raw(""),
-            Line::from(Span::raw("  This stops Metro and any running builds.")),
-            Line::from(Span::raw(format!("  This session created {sim}."))),
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled("d", Style::default().fg(Color::Red)),
-                Span::raw(" quit, delete it  "),
-                Span::styled("k/⏎", Style::default().fg(Color::Green)),
-                Span::raw(" quit, keep it  "),
-                Span::styled("esc", Style::default().fg(Color::Cyan)),
-                Span::raw(" cancel"),
-            ]),
-        ];
-        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-        return;
-    }
-    let r = centered(area, 50, 5);
-    frame.render_widget(Clear, r); // wipe whatever's underneath
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(" Quit signalbox? ");
-    let inner = block.inner(r);
-    frame.render_widget(block, r);
-    let lines = vec![
-        Line::raw(""),
-        Line::from(Span::raw("  This stops Metro and any running builds.")),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("y/⏎", Style::default().fg(Color::Green)),
-            Span::raw(" quit    "),
-            Span::styled("n/esc", Style::default().fg(Color::Cyan)),
-            Span::raw(" cancel"),
-        ]),
-    ];
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 fn focus_border(focused: bool) -> Style {
@@ -2336,7 +1510,7 @@ fn render_processes(app: &mut DashApp, frame: &mut Frame, area: Rect) {
                     ca,
                 );
             }
-            let lines = pty_lines(&p.parser(), body.width, body.height);
+            let lines = term::pty_lines(&p.parser(), body.width, body.height);
             frame.render_widget(Paragraph::new(Text::from(lines)), body);
         }
         None => {
@@ -2534,85 +1708,10 @@ fn render_status(app: &DashApp, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(padded).style(style), area);
 }
 
-fn pty_lines(
-    parser: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
-    width: u16,
-    height: u16,
-) -> Vec<Line<'static>> {
-    let guard = match parser.lock() {
-        Ok(g) => g,
-        Err(_) => return Vec::new(),
-    };
-    let screen = guard.screen();
-    let (srows, scols) = screen.size();
-    let h = height.min(srows);
-    let w = width.min(scols);
-    let mut lines: Vec<Line> = Vec::with_capacity(height as usize);
-    for row in 0..h {
-        let mut spans: Vec<Span> = Vec::new();
-        let mut run = String::new();
-        let mut run_style = Style::default();
-        for col in 0..w {
-            let (glyph, style) = match screen.cell(row, col) {
-                Some(cell) => {
-                    let g = cell.contents();
-                    (
-                        if g.is_empty() { " ".to_string() } else { g },
-                        cell_style(cell),
-                    )
-                }
-                None => (" ".to_string(), Style::default()),
-            };
-            if style != run_style && !run.is_empty() {
-                spans.push(Span::styled(std::mem::take(&mut run), run_style));
-            }
-            run_style = style;
-            run.push_str(&glyph);
-        }
-        if !run.is_empty() {
-            spans.push(Span::styled(run, run_style));
-        }
-        lines.push(Line::from(spans));
-    }
-    while lines.len() < height as usize {
-        lines.push(Line::raw(""));
-    }
-    lines
-}
-
-fn cell_style(cell: &vt100::Cell) -> Style {
-    let mut s = Style::default();
-    if let Some(fg) = conv_color(cell.fgcolor()) {
-        s = s.fg(fg);
-    }
-    if let Some(bg) = conv_color(cell.bgcolor()) {
-        s = s.bg(bg);
-    }
-    if cell.bold() {
-        s = s.add_modifier(Modifier::BOLD);
-    }
-    if cell.italic() {
-        s = s.add_modifier(Modifier::ITALIC);
-    }
-    if cell.underline() {
-        s = s.add_modifier(Modifier::UNDERLINED);
-    }
-    if cell.inverse() {
-        s = s.add_modifier(Modifier::REVERSED);
-    }
-    s
-}
-
-fn conv_color(c: vt100::Color) -> Option<Color> {
-    match c {
-        vt100::Color::Default => None,
-        vt100::Color::Idx(i) => Some(Color::Indexed(i)),
-        vt100::Color::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::links::{picker_char, picker_index};
+    use super::term::{key_to_bytes, pty_lines};
     use super::*;
     use ratatui::backend::TestBackend;
 
