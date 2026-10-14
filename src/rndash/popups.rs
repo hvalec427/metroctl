@@ -165,8 +165,14 @@ pub(super) fn centered(area: Rect, w: u16, h: u16) -> Rect {
     }
 }
 
-pub(super) fn render_quit_popup(frame: &mut Frame, area: Rect, created_sim: Option<String>) {
-    if let Some(sim) = created_sim {
+/// `created`: the device this session created and what quitting can do with
+/// it ("delete" a simulator, "stop" an emulator), to offer that.
+pub(super) fn render_quit_popup(
+    frame: &mut Frame,
+    area: Rect,
+    created: Option<(String, &'static str)>,
+) {
+    if let Some((sim, verb)) = created {
         let r = centered(area, 64, 6);
         frame.render_widget(Clear, r);
         let block = Block::default()
@@ -182,7 +188,7 @@ pub(super) fn render_quit_popup(frame: &mut Frame, area: Rect, created_sim: Opti
             Line::from(vec![
                 Span::raw("  "),
                 Span::styled("d", Style::default().fg(Color::Red)),
-                Span::raw(" quit, delete it  "),
+                Span::raw(format!(" quit, {verb} it  ")),
                 Span::styled("k/⏎", Style::default().fg(Color::Green)),
                 Span::raw(" quit, keep it  "),
                 Span::styled("esc", Style::default().fg(Color::Cyan)),

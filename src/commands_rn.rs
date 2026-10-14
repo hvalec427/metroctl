@@ -46,7 +46,7 @@ pub fn launch(opts: UpOpts) {
 }
 
 /// Apply `up` options before the dashboard opens: the port override and the
-/// device to pin (creating a simulator if asked).
+/// device to pin (creating a simulator or starting an emulator if asked).
 fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> {
     for d in session::reap_stale() {
         eprintln!("{d}");
@@ -75,6 +75,17 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
             android: false,
             cleanup,
             name: Some(name),
+        })
+    } else if let Some(avd) = &opts.new_emulator {
+        let (serial, avd) = session::start_emulator(avd.as_deref())?;
+        eprintln!("started {avd} ({serial})");
+        Some(Pinned {
+            udid: serial,
+            created: true,
+            simulator: false,
+            android: true,
+            cleanup,
+            name: Some(avd),
         })
     } else {
         opts.device

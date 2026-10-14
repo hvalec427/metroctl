@@ -111,14 +111,24 @@ pub(super) fn spawn_poller(
                 ios_checked = Some(Instant::now());
             }
             ios_udids = udids;
-            // Resolve a running emulator's adb serial from its AVD name.
+            // Resolve a running emulator's adb serial from its AVD name. With
+            // several instances of one AVD (`up --new-emulator`), this
+            // session's own one.
             let android_serial = |avd: &str| {
-                running_devices.iter().find_map(|d| match d {
-                    RunningDevice::AndroidEmulator { name, serial } if name == avd => {
-                        Some(serial.clone())
-                    }
-                    _ => None,
-                })
+                let serials: Vec<&String> = running_devices
+                    .iter()
+                    .filter_map(|d| match d {
+                        RunningDevice::AndroidEmulator { name, serial } if name == avd => {
+                            Some(serial)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                serials
+                    .iter()
+                    .find(|s| Some(s.as_str()) == pinned_udid.as_deref())
+                    .or(serials.first())
+                    .map(|s| s.to_string())
             };
             // Is the configured app installed / in the foreground? Android only —
             // the iOS simctl probe was unreliable, so we don't check it.

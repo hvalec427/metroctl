@@ -135,6 +135,7 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
         }
     }
     let socket = app.socket.clone();
+    let android = app.pinned.as_ref().is_some_and(|p| p.android);
     // Stopped by a signal (window closed, killed, `signalbox down`) with a
     // simulator we created: leave the session files, so `down`, `gc` or the
     // next `up` can still find and delete that simulator.
@@ -147,9 +148,9 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
         let _ = std::fs::remove_file(p);
     }
     if let Some(udid) = delete {
-        eprintln!("deleting simulator {udid}…");
-        if let Err(e) = session::delete_simulator(&udid) {
-            eprintln!("{e}");
+        match session::discard_device(&udid, android) {
+            Ok(done) => eprintln!("{done}"),
+            Err(e) => eprintln!("{e}"),
         }
     }
     res
@@ -1379,12 +1380,17 @@ fn render(app: &mut DashApp, frame: &mut Frame) {
         popups::render_help(top, frame, area);
     }
     if app.confirm_quit {
+        let android = app.pinned.as_ref().is_some_and(|p| p.android);
         let sim = app.ask_delete_sim().then(|| {
-            app.devices
+            let label = app
+                .devices
                 .iter()
                 .find(|d| d.pinned)
-                .map(|d| d.label.clone())
-                .unwrap_or_else(|| "the simulator".into())
+                .map(|d| d.label.clone());
+            match android {
+                true => (label.unwrap_or_else(|| "the emulator".into()), "stop"),
+                false => (label.unwrap_or_else(|| "the simulator".into()), "delete"),
+            }
         });
         popups::render_quit_popup(frame, area, sim);
     }
@@ -2100,6 +2106,25 @@ mod tests {
         app.devices = vec![row];
         press(&mut app, "q");
         snapshot("quit_created_sim", &mut app, 100, 30);
+        press(&mut app, "d");
+        assert!(app.quit && app.delete_sim_on_quit);
+    }
+
+    #[test]
+    fn quit_offers_to_stop_a_started_emulator() {
+        let pinned = Pinned {
+            udid: "emulator-5556".into(),
+            created: true,
+            simulator: false,
+            android: true,
+            cleanup: SimCleanup::Ask,
+            name: Some("Pixel_8".into()),
+        };
+        let mut app = app_with(project(LINKS), Some(pinned));
+        press(&mut app, "q");
+        let s = screen(&mut app, 100, 30);
+        assert!(s.contains("This session created the emulator."), "{s}");
+        assert!(s.contains("d quit, stop it"), "{s}");
         press(&mut app, "d");
         assert!(app.quit && app.delete_sim_on_quit);
     }

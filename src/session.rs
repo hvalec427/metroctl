@@ -29,6 +29,8 @@ pub struct UpOpts {
     pub new_sim: Option<Option<String>>,
     pub sim_type: Option<String>,
     pub sim_runtime: Option<String>,
+    /// Start a throwaway emulator for this session (optionally of this AVD).
+    pub new_emulator: Option<Option<String>>,
     pub sim_cleanup: Option<SimCleanup>,
     pub install: bool,
     /// Install the app the main checkout already built instead of building.
@@ -39,9 +41,9 @@ pub struct UpOpts {
 #[derive(Clone, Debug)]
 pub struct Pinned {
     pub udid: String,
-    pub created: bool,   // we created it, so we may delete it
+    pub created: bool, // we created it (a simulator, or an emulator instance), so we may discard it
     pub simulator: bool, // false for a physical device (nothing to boot)
-    pub android: bool,   // an adb serial (emulator or phone) rather than an iOS udid
+    pub android: bool, // an adb serial (emulator or phone) rather than an iOS udid
     pub cleanup: SimCleanup,
     pub name: Option<String>, // device name, to tell its app apart from others on the same Metro
 }
@@ -195,11 +197,8 @@ pub fn reap_stale() -> Vec<String> {
         }
         if let Some(udid) = &s.udid {
             if s.created_sim {
-                if delete_simulator(udid).is_ok() {
-                    done.push(format!(
-                        "deleted simulator {udid} of a dead session in {}",
-                        s.root
-                    ));
+                if let Ok(what) = discard_device(udid, s.platform.as_deref() == Some("android")) {
+                    done.push(format!("{what} of a dead session in {}", s.root));
                 }
             } else if s.platform.as_deref() == Some("android") {
                 android_release(udid);
@@ -619,7 +618,9 @@ pub fn point_app_at_port(udid: &str, bundle: &str, port: u16) -> Result<bool> {
 
 /// adb serials of connected, ready Android devices and emulators.
 pub fn adb_serials() -> Vec<String> {
-    let out = Command::new("adb").arg("devices").output();
+    let out = Command::new(simon::android::find_bin("adb"))
+        .arg("devices")
+        .output();
     let text = out
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
@@ -664,14 +665,27 @@ pub fn pin_device(id: &str, cleanup: SimCleanup) -> Result<Pinned> {
 fn boot_avd(avd: &str) -> Result<String> {
     eprintln!("starting emulator {avd}…");
     simon::android::launch_avd(avd)?;
-    let deadline = Instant::now() + Duration::from_secs(240);
-    while Instant::now() < deadline {
-        let serial = simon::android::running_emulators()
+    let serial = || {
+        simon::android::running_emulators()
             .into_iter()
             .find(|e| e.name == avd)
-            .map(|e| e.serial);
-        if let Some(serial) = serial {
-            let booted = Command::new("adb")
+            .map(|e| e.serial)
+    };
+    wait_booted(avd, serial, || Ok(()))
+}
+
+/// Poll until the emulator `serial()` finds has finished booting (4 minutes
+/// at most), checking `alive()` in between; returns the serial.
+fn wait_booted(
+    avd: &str,
+    serial: impl Fn() -> Option<String>,
+    mut alive: impl FnMut() -> Result<()>,
+) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(240);
+    while Instant::now() < deadline {
+        alive()?;
+        if let Some(serial) = serial() {
+            let booted = Command::new(simon::android::find_bin("adb"))
                 .args(["-s", &serial, "shell", "getprop", "sys.boot_completed"])
                 .output()
                 .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1");
@@ -682,6 +696,148 @@ fn boot_avd(avd: &str) -> Result<String> {
         std::thread::sleep(Duration::from_secs(2));
     }
     bail!("emulator {avd} didn't finish booting in 4 minutes")
+}
+
+/// The AVD `--new-emulator` runs: the one named, or the only one there is.
+pub fn pick_avd(avds: &[String], name: Option<&str>) -> Result<String> {
+    match name {
+        Some(n) if avds.iter().any(|a| a == n) => Ok(n.to_string()),
+        Some(n) => bail!("no AVD named {n} (have: {})", list_or_none(avds)),
+        None => match avds {
+            [only] => Ok(only.clone()),
+            [] => {
+                bail!("no Android Virtual Devices; create one in Android Studio's Device Manager")
+            }
+            _ => bail!(
+                "several AVDs ({}); name one: --new-emulator <AVD>",
+                avds.join(", ")
+            ),
+        },
+    }
+}
+
+fn list_or_none(v: &[String]) -> String {
+    if v.is_empty() {
+        "none".into()
+    } else {
+        v.join(", ")
+    }
+}
+
+/// First emulator console port (even, 5554–5680) whose port pair is free and
+/// no adb device already uses; the instance's adb serial is `emulator-<port>`.
+pub fn free_emulator_port(taken: &[String]) -> Result<u16> {
+    let free = |p: u16| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok();
+    (5554..=5680)
+        .step_by(2)
+        .find(|&p| !taken.contains(&format!("emulator-{p}")) && free(p) && free(p + 1))
+        .ok_or_else(|| anyhow!("no free emulator port in 5554–5681"))
+}
+
+/// Start a throwaway instance of an AVD for this session and wait until it
+/// has booted. `-read-only` lets it run next to other instances of the same
+/// AVD and drops whatever it writes when it stops, so stopping it is all the
+/// cleanup it needs. Returns (adb serial, AVD name).
+pub fn start_emulator(avd: Option<&str>) -> Result<(String, String)> {
+    use std::os::unix::process::CommandExt;
+    let avd = pick_avd(&simon::android::list_avds(), avd)?;
+    let port = free_emulator_port(&adb_serials())?;
+    let emulator = simon::android::find_bin("emulator");
+    let sdk = simon::android::sdk_root();
+    eprintln!("starting a read-only {avd} emulator on port {port}…");
+    let log_path = std::env::temp_dir().join(format!("signalbox-emulator-{port}.log"));
+    let log = std::fs::File::create(&log_path)?;
+    let mut child = Command::new(&emulator)
+        .args([
+            "-avd",
+            &avd,
+            "-read-only",
+            "-no-snapshot-save",
+            "-no-boot-anim",
+        ])
+        .args(["-port", &port.to_string()])
+        .current_dir(
+            Path::new(&emulator)
+                .parent()
+                .unwrap_or_else(|| Path::new(".")),
+        )
+        .env("ANDROID_HOME", &sdk)
+        .env("ANDROID_SDK_ROOT", &sdk)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(log)
+        // Its own process group: closing the terminal mustn't take it down
+        // when the session keeps it.
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("starting {emulator}"))?;
+    let serial = format!("emulator-{port}");
+    let booted = wait_booted(
+        &avd,
+        || adb_serials().contains(&serial).then(|| serial.clone()),
+        || match child.try_wait()? {
+            None => Ok(()),
+            Some(status) => {
+                let err = std::fs::read_to_string(&log_path).unwrap_or_default();
+                let last = err.lines().rev().find(|l| !l.trim().is_empty());
+                bail!(
+                    "emulator {avd} exited during boot ({status}){}",
+                    last.map(|l| format!(": {}", l.trim())).unwrap_or_default()
+                )
+            }
+        },
+    );
+    if booted.is_err() {
+        let _ = child.kill();
+    }
+    Ok((booted?, avd))
+}
+
+/// Stop an emulator (`adb emu kill`) and wait for it to leave adb.
+pub fn stop_emulator(serial: &str) -> Result<()> {
+    let out = Command::new(simon::android::find_bin("adb"))
+        .args(["-s", serial, "emu", "kill"])
+        .output()?;
+    if !out.status.success() {
+        bail!(
+            "adb emu kill: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    // It goes offline before it's gone; wait until adb doesn't list it at all.
+    let t = Instant::now();
+    while adb_listed(serial) {
+        if t.elapsed() > Duration::from_secs(30) {
+            bail!("emulator {serial} is still running 30s after `adb emu kill`");
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+/// Whether `adb devices` lists `serial` in any state (offline included).
+fn adb_listed(serial: &str) -> bool {
+    Command::new(simon::android::find_bin("adb"))
+        .arg("devices")
+        .output()
+        .is_ok_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .skip(1)
+                .any(|l| l.split('\t').next() == Some(serial))
+        })
+}
+
+/// Get rid of a device a session created: delete the simulator, or stop the
+/// emulator instance. Returns what was done.
+pub fn discard_device(udid: &str, android: bool) -> Result<String> {
+    if android {
+        stop_emulator(udid)?;
+        Ok(format!("stopped emulator {udid}"))
+    } else {
+        delete_simulator(udid)?;
+        Ok(format!("deleted simulator {udid}"))
+    }
 }
 
 /// Android's counterpart of `point_app_at_port`: the app loads from
@@ -826,8 +982,10 @@ pub fn down(root: &Path, keep_sim: bool) -> Result<()> {
             .output();
     }
     if let (Some(udid), true, false) = (&s.udid, s.created_sim, keep_sim) {
-        delete_simulator(udid)?;
-        println!("deleted simulator {udid}");
+        println!(
+            "{}",
+            discard_device(udid, s.platform.as_deref() == Some("android"))?
+        );
     } else if let (Some(udid), Some("android")) = (&s.udid, s.platform.as_deref()) {
         android_release(udid);
     } else if let (Some(udid), Some(bundle)) = (&s.udid, &s.bundle) {
@@ -854,6 +1012,62 @@ mod tests {
             {"name": "watchOS 11.2", "version": "11.2", "platform": "watchOS", "isAvailable": true, "identifier": "rt.w",
              "supportedDeviceTypes": []},
         ]})
+    }
+
+    #[test]
+    fn picks_the_named_or_only_avd() {
+        let avds = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(pick_avd(&avds(&["Pixel_8"]), None).unwrap(), "Pixel_8");
+        assert_eq!(
+            pick_avd(&avds(&["Pixel_8", "Tab"]), Some("Tab")).unwrap(),
+            "Tab"
+        );
+        let err = |v: &[&str], n| pick_avd(&avds(v), n).unwrap_err().to_string();
+        assert_eq!(
+            err(&["Pixel_8", "Tab"], None),
+            "several AVDs (Pixel_8, Tab); name one: --new-emulator <AVD>"
+        );
+        assert_eq!(
+            err(&["Pixel_8"], Some("Nope")),
+            "no AVD named Nope (have: Pixel_8)"
+        );
+        assert!(err(&[], None).starts_with("no Android Virtual Devices"));
+    }
+
+    #[test]
+    fn emulator_ports_skip_taken_serials_and_busy_pairs() {
+        let taken = vec!["emulator-5554".to_string()];
+        let p = free_emulator_port(&taken).unwrap();
+        assert!(p >= 5556 && p.is_multiple_of(2));
+        // Hold the console port of the next pick, and the adb port of the one after.
+        let _a = std::net::TcpListener::bind(("127.0.0.1", p)).unwrap();
+        let q = free_emulator_port(&taken).unwrap();
+        assert!(q > p);
+        let _b = std::net::TcpListener::bind(("127.0.0.1", q + 1)).unwrap();
+        assert!(free_emulator_port(&taken).unwrap() > q);
+    }
+
+    /// Needs an Android SDK and an AVD: SIGNALBOX_TEST_AVD=<name> cargo test -- --ignored
+    #[test]
+    #[ignore]
+    fn runs_two_throwaway_emulators_of_one_avd() {
+        let avd = std::env::var("SIGNALBOX_TEST_AVD").ok();
+        let (a, name) = start_emulator(avd.as_deref()).unwrap();
+        let (b, _) = start_emulator(Some(&name)).unwrap();
+        assert_ne!(a, b);
+        assert!(adb_serials().contains(&a) && adb_serials().contains(&b));
+        let names: Vec<_> = simon::android::running_emulators()
+            .into_iter()
+            .filter(|e| e.serial == a || e.serial == b)
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec![name.clone(), name]);
+        assert_eq!(
+            discard_device(&a, true).unwrap(),
+            format!("stopped emulator {a}")
+        );
+        discard_device(&b, true).unwrap();
+        assert!(!adb_listed(&a) && !adb_listed(&b));
     }
 
     #[test]

@@ -44,7 +44,7 @@ enum Command {
         #[arg(long)]
         port: Option<String>,
         /// Pin to an existing device: iOS udid, AVD name, adb serial, or a name only one device has; started if needed
-        #[arg(long, conflicts_with = "new_sim")]
+        #[arg(long, conflicts_with_all = ["new_sim", "new_emulator"])]
         device: Option<String>,
         /// Create a new simulator for this session (default name: signalbox-<dir>)
         #[arg(long = "new-sim", value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
@@ -55,7 +55,11 @@ enum Command {
         /// iOS runtime for --new-sim, e.g. 18.2 (default: newest installed)
         #[arg(long = "sim-runtime", requires = "new_sim")]
         sim_runtime: Option<String>,
-        /// What to do with the created simulator when you quit
+        /// Start a throwaway Android emulator for this session: a read-only instance of the AVD
+        /// (default: the only one), on its own port; what it writes is dropped when it stops
+        #[arg(long = "new-emulator", value_name = "AVD", num_args = 0..=1, default_missing_value = "", conflicts_with = "new_sim")]
+        new_emulator: Option<String>,
+        /// What to do with the created simulator or emulator when you quit
         #[arg(long = "sim-cleanup", value_enum, default_value = "ask")]
         sim_cleanup: session::SimCleanup,
         /// Install JS deps and pods before starting Metro
@@ -160,6 +164,7 @@ fn main() {
             new_sim,
             sim_type,
             sim_runtime,
+            new_emulator,
             sim_cleanup,
             install,
             prebuilt,
@@ -176,12 +181,14 @@ fn main() {
                 },
             };
             let new_sim = new_sim.map(|n| Some(n).filter(|n| !n.is_empty()));
+            let new_emulator = new_emulator.map(|n| Some(n).filter(|n| !n.is_empty()));
             commands_rn::launch(session::UpOpts {
                 port,
                 device,
                 new_sim,
                 sim_type,
                 sim_runtime,
+                new_emulator,
                 sim_cleanup: Some(sim_cleanup),
                 install,
                 prebuilt,
