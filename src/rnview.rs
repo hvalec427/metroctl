@@ -2104,14 +2104,13 @@ fn handle_key(view: &mut RnView, key: KeyEvent, client: &RnClient) -> bool {
         open_component_source(view);
         return false;
     }
+    // Select by tapping works from anywhere in the tab, the full panel too.
+    if view.tab == Tab::Components && key.code == KeyCode::Char('s') {
+        view.toggle_picking();
+        return false;
+    }
     if view.tab == Tab::Components && !(view.detail && view.maximized) {
         match key.code {
-            KeyCode::Char('s') => {
-                return {
-                    view.toggle_picking();
-                    false
-                }
-            }
             // The tree has nothing to clear or follow.
             KeyCode::Char('c' | 'a' | ' ' | 'p')
                 if !key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -2640,6 +2639,22 @@ mod tests {
         // A third of the pane, plus the (blank) fold marker and its space.
         assert_eq!(indent(rows.last().unwrap()), view.detail_width / 3 + 2);
         assert_eq!(indent(&rows[0]), 0, "rows above the shift sit at the edge");
+    }
+
+    #[test]
+    fn s_works_in_the_full_panel() {
+        let (mut view, client, sent) = components();
+        view.tick(&client);
+        view.on_event(RnEvent::Devtools(
+            APP.into(),
+            "operations".into(),
+            tree_ops(),
+        ));
+        key(&mut view, &client, KeyCode::Char('z'));
+        messages(&sent);
+        key(&mut view, &client, KeyCode::Char('s'));
+        view.tick(&client);
+        assert!(messages(&sent).contains(&"startInspectingHost null".to_string()));
     }
 
     #[test]

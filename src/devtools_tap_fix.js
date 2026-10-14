@@ -1,7 +1,14 @@
-// Injected into the app by signalbox's Components tab (`s`, select by tapping).
-// React Native's selection overlay hit-tests the tap with each renderer's
+// Injected into the app by signalbox's Components tab (`s`, select by tapping),
+// right after it connects to the React DevTools backend. React Native's
+// selection overlay hit-tests the tap with each renderer's
 // `getInspectorDataForViewAtPoint` and hands the result to React DevTools'
-// agent. Two things break that on Fabric, fixed here by wrapping the hit test:
+// agent. Things that break that on Fabric, fixed here:
+//
+// 0. A stale agent: AppContainer keeps the agent that existed when it first
+//    rendered, and only follows newer ones if there was none then. After a
+//    reload the backend connects before AppContainer renders, so a later
+//    connection (signalbox reattaching) leaves the overlay on a dead agent and
+//    `s` does nothing. AppContainer's state is set to the current agent.
 //
 // 1. Pager pages (react-native-pager-view, so tab views): every page shares the
 //    same frame in the shadow tree, so the native hit test lands in the topmost
@@ -11,10 +18,13 @@
 //    the text under its host instance, so the agent can't resolve the hit and
 //    the overlay drops it. The hit is handed over as the nearest host instance
 //    the agent knows: the hit component's own host, else an ancestor's.
+// 3. Text highlights: React Native outlines an element through its public
+//    instance and skips it when there is none, so selected text got no
+//    outline. Highlighted host instances get theirs created first.
 //
-// Idempotent; run again after a reload.
+// Idempotent; run again after a reload and after each connection.
 (() => {
-  const VERSION = 3;
+  const VERSION = 5;
   const hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
   if (hook == null || hook.renderers == null) return 'unsupported';
 
@@ -84,6 +94,57 @@
     return null;
   };
 
+  // 0. Point AppContainer (and so its overlay) at the current agent.
+  const followCurrentAgent = () => {
+    const current = hook.reactDevtoolsAgent;
+    if (current == null || !hook.getFiberRoots) return;
+    for (const root of hook.getFiberRoots(1)) {
+      const queue = [[root.current, 0]];
+      while (queue.length) {
+        const [f, depth] = queue.shift();
+        if (f == null || depth > 40) continue;
+        if (f.type && f.type.name === 'ReactDevToolsOverlay') {
+          const stale = f.memoizedProps.reactDevToolsAgent;
+          if (stale === current) return;
+          // AppContainer: the component that rendered the overlay; its
+          // `useState` hook holding the stale agent.
+          for (let owner = f.return; owner != null; owner = owner.return) {
+            for (let hookState = owner.memoizedState; hookState != null; hookState = hookState.next) {
+              if (hookState.memoizedState === stale && hookState.queue && typeof hookState.queue.dispatch === 'function') {
+                hookState.queue.dispatch(current);
+                return;
+              }
+            }
+          }
+          return;
+        }
+        queue.push([f.child, depth + 1], [f.sibling, depth]);
+      }
+    }
+  };
+
+  // 3. Public instances for the host instances React DevTools highlights.
+  const withPublicInstances = (renderers) => {
+    if (renderers == null) return;
+    const list = renderers instanceof Map ? [...renderers.values()] : Object.values(renderers);
+    for (const ri of list) {
+      const find = ri && ri.findHostInstancesForElementID;
+      if (typeof find !== 'function' || find.__signalbox) continue;
+      const wrapped = function (id) {
+        const nodes = find.apply(this, arguments);
+        for (const node of nodes || []) {
+          const canonical = node && node.canonical;
+          if (canonical && canonical.publicInstance == null && canonical.internalInstanceHandle) {
+            toPublic(canonical.internalInstanceHandle);
+          }
+        }
+        return nodes;
+      };
+      wrapped.__signalbox = true;
+      ri.findHostInstancesForElementID = wrapped;
+    }
+  };
+
   const patch = (renderer) => {
     const config = renderer && renderer.rendererConfig;
     const current = config && config.getInspectorDataForViewAtPoint;
@@ -123,6 +184,10 @@
     config.getInspectorDataForViewAtPoint = wrapped;
   };
   hook.renderers.forEach(patch);
+  try {
+    followCurrentAgent();
+  } catch (e) {}
+  withPublicInstances(hook.rendererInterfaces);
   if (!hook.__signalboxTapFix) {
     hook.__signalboxTapFix = true;
     hook.on('renderer', (e) => patch(e && e.renderer));

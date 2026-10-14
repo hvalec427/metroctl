@@ -376,6 +376,7 @@ fn conn_loop(
     let mut paused = false;
     // The Components tab is attached to this app's React DevTools backend.
     let mut devtools = false;
+    let mut devtools_fix_pending = false; // reloaded: re-install the tap fix
     const FPS_EXPR: &str = "(function(){var s=globalThis.__simonFps;if(!s){s=globalThis.__simonFps={v:0,c:0,t:Date.now()};var loop=function(){s.c++;var n=Date.now();if(n-s.t>=1000){s.v=Math.round(s.c*1000/(n-s.t));s.c=0;s.t=n;}(globalThis.requestAnimationFrame||function(f){return setTimeout(f,16);})(loop);};loop();}return s.v;})()";
 
     loop {
@@ -454,7 +455,6 @@ fn conn_loop(
                         "Runtime.addBinding",
                         json!({ "name": DEVTOOLS_BINDING }),
                     );
-                    evaluate(&mut socket, &mut seq, DEVTOOLS_TAP_FIX_JS);
                     seq += 1;
                     let rid = seq;
                     let _ = socket.send(tungstenite::Message::Text(
@@ -479,6 +479,9 @@ fn conn_loop(
                         Some(v) if v == "missing" => Some("this app has no React DevTools backend (needs React Native 0.76+ in a dev build)"),
                         _ => Some("couldn't reach the app's React DevTools backend"),
                     };
+                    // After connecting: the fix also points React Native's
+                    // overlay at the agent this connection created.
+                    evaluate(&mut socket, &mut seq, DEVTOOLS_TAP_FIX_JS);
                     if let Some(why) = why {
                         let _ = tx.send(RnEvent::Devtools(
                             key.into(),
@@ -550,8 +553,17 @@ fn conn_loop(
                     );
                 }
                 // A reload: the backend reconnects by itself (the binding
-                // survives), but the tap fix lived in the old JS context.
+                // survives), but the tap fix lived in the old JS context. The
+                // new context has no app code yet, so install the fix once the
+                // backend sends its first tree.
                 if devtools && t.contains("\"Runtime.executionContextCreated\"") {
+                    devtools_fix_pending = true;
+                }
+                if devtools_fix_pending
+                    && t.contains("\"Runtime.bindingCalled\"")
+                    && t.contains("operations")
+                {
+                    devtools_fix_pending = false;
                     evaluate(&mut socket, &mut seq, DEVTOOLS_TAP_FIX_JS);
                 }
                 // Surface the app's main bundle URL for the DAP source-map fetch.
@@ -1778,6 +1790,72 @@ mod tests {
         wait_for(&rx, |e| {
             matches!(e, RnEvent::Status(_, Status::Connected)).then_some(())
         });
+    }
+
+    #[test]
+    fn attaches_devtools_and_reinstalls_the_tap_fix_after_a_reload() {
+        let metro = FakeMetro::with(|req| match req["params"]["expression"].as_str() {
+            Some(e) if e.contains("initializeDomain") => {
+                vec![reply(
+                    req,
+                    json!({"result": {"type": "string", "value": "ok"}}),
+                )]
+            }
+            _ => vec![reply(req, json!({}))],
+        });
+        let c = connect(&metro);
+        let fixes = || {
+            metro
+                .requests("Runtime.evaluate")
+                .iter()
+                .filter(|r| {
+                    r["params"]["expression"]
+                        .as_str()
+                        .is_some_and(|e| e.contains("__signalboxOriginal"))
+                })
+                .count()
+        };
+        let wait = |n: usize| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while fixes() < n {
+                assert!(
+                    Instant::now() < deadline,
+                    "tap fix not sent ({} of {n})",
+                    fixes()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        c.cmd.send(ConnCmd::DevtoolsAttach).unwrap();
+        wait(1);
+        assert_eq!(metro.requests("Runtime.addBinding").len(), 1);
+        // A bridge message from the backend reaches the UI.
+        let msg = |event: &str, payload: Value| {
+            json!({"method": "Runtime.bindingCalled", "params": {
+                "name": DEVTOOLS_BINDING,
+                "payload": json!({"domain": "react-devtools", "message": {"event": event, "payload": payload}}).to_string(),
+            }})
+        };
+        metro.send(msg("operations", json!([1, 1, 0])));
+        let (event, payload) = wait_for(&c.rx, |e| match e {
+            RnEvent::Devtools(_, ev, p) => Some((ev, p)),
+            _ => None,
+        });
+        assert_eq!((event.as_str(), payload), ("operations", json!([1, 1, 0])));
+        // Reloaded: nothing is installed until the backend's first tree.
+        metro.send(json!({"method": "Runtime.executionContextCreated"}));
+        metro.send(console("after reload"));
+        log_text(&c.rx, "after reload");
+        assert_eq!(fixes(), 1);
+        metro.send(msg("operations", json!([1, 2, 0])));
+        wait(2);
+        // Detaching unsubscribes from the binding.
+        c.cmd.send(ConnCmd::DevtoolsDetach).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while metro.requests("Runtime.removeBinding").is_empty() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
