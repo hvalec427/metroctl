@@ -764,12 +764,23 @@ fn await_result(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTl
 }
 
 /// Deep-expand an object via Runtime.getProperties into pretty JS lines.
+/// Most `Runtime.getProperties` round trips one console entry may spend. Each is
+/// a blocking trip to the device, and an app that logs whole API responses would
+/// otherwise stall this connection (and every network event behind it) for
+/// seconds per log line. Objects past the budget print as `{…}`.
+const EXPAND_BUDGET: usize = 25;
+
 fn get_object_tree(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, seq: &mut i64, object_id: &str, depth: i32) -> Option<Vec<String>> {
-    let val = build_value(socket, seq, object_id, depth)?;
+    let mut budget = EXPAND_BUDGET;
+    let val = build_value(socket, seq, object_id, depth, &mut budget)?;
     Some(format_js(&val, "").lines().map(String::from).collect())
 }
 
-fn build_value(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, seq: &mut i64, object_id: &str, depth: i32) -> Option<Value> {
+fn build_value(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, seq: &mut i64, object_id: &str, depth: i32, budget: &mut usize) -> Option<Value> {
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
     *seq += 1;
     let req_id = *seq;
     let _ = socket.send(tungstenite::Message::Text(json!({"id": req_id, "method": "Runtime.getProperties", "params": {"objectId": object_id, "ownProperties": true}}).to_string()));
@@ -796,7 +807,7 @@ fn build_value(socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTls
         }
         let v = &p["value"];
         let child = if v["type"].as_str() == Some("object") && v.get("objectId").is_some() && depth > 0 {
-            build_value(socket, seq, v["objectId"].as_str().unwrap(), depth - 1).unwrap_or(Value::String("{…}".into()))
+            build_value(socket, seq, v["objectId"].as_str().unwrap(), depth - 1, budget).unwrap_or(Value::String("{…}".into()))
         } else {
             primitive(v)
         };
