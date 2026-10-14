@@ -7,6 +7,8 @@ mod commands_rn;
 mod control;
 mod devinfo;
 mod devlog;
+#[cfg(test)]
+mod fake_metro;
 mod mcp;
 mod metro_events;
 mod proc;

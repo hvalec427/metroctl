@@ -1183,3 +1183,452 @@ mod base64_lite {
         String::from_utf8_lossy(&out).into_owned()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fake_metro::{reply, FakeMetro};
+    use std::time::Instant;
+
+    /// A `conn_loop` against `metro`'s target "page", as `poll_loop` starts it.
+    struct Conn {
+        rx: Receiver<RnEvent>,
+        cmd: Sender<ConnCmd>,
+        bundle: UrlSlot,
+    }
+
+    fn connect(metro: &FakeMetro) -> Conn {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (cmd, crx) = std::sync::mpsc::channel();
+        let sink: DebugSink = Arc::new(Mutex::new(None));
+        let bundle: UrlSlot = Arc::new(Mutex::new(None));
+        let (url, port, b) = (metro.ws_url("page"), metro.port, bundle.clone());
+        std::thread::spawn(move || conn_loop("page", &url, port, &tx, crx, &sink, &b));
+        metro.wait_connected();
+        Conn { rx, cmd, bundle }
+    }
+
+    /// The first event `pick` accepts within a few seconds; earlier ones are skipped.
+    fn wait_for<T>(rx: &Receiver<RnEvent>, mut pick: impl FnMut(RnEvent) -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            if let Ok(ev) = rx.recv_timeout(left) {
+                if let Some(v) = pick(ev) {
+                    return v;
+                }
+            }
+        }
+        panic!("event not received");
+    }
+
+    fn log_text(rx: &Receiver<RnEvent>, text: &str) -> LogEntry {
+        wait_for(rx, |e| match e {
+            RnEvent::Log(_, l) if l.text == text => Some(l),
+            _ => None,
+        })
+    }
+
+    fn console(text: &str) -> Value {
+        json!({"method": "Runtime.consoleAPICalled", "params": {
+            "type": "log", "args": [{"type": "string", "value": text}]}})
+    }
+
+    #[test]
+    fn enables_the_domains_on_connect() {
+        let metro = FakeMetro::start();
+        let c = connect(&metro);
+        wait_for(&c.rx, |e| {
+            matches!(e, RnEvent::Status(_, Status::Connected)).then_some(())
+        });
+        for m in [
+            "Runtime.enable",
+            "Log.enable",
+            "Network.enable",
+            "Debugger.enable",
+            "Runtime.runIfWaitingForDebugger",
+        ] {
+            assert_eq!(metro.requests(m).len(), 1, "{m}");
+        }
+    }
+
+    #[test]
+    fn reports_disconnect_when_metro_closes_the_socket() {
+        let metro = FakeMetro::start();
+        let c = connect(&metro);
+        metro.close_all();
+        wait_for(&c.rx, |e| {
+            matches!(e, RnEvent::Status(_, Status::Disconnected)).then_some(())
+        });
+    }
+
+    #[test]
+    fn follows_a_request_through_to_its_body() {
+        // The body reply comes after an unrelated console event, which must
+        // still reach the UI (it used to be dropped while awaiting the reply).
+        let metro = FakeMetro::with(|req| match req["method"].as_str() {
+            Some("Network.getResponseBody") => vec![
+                console("meanwhile"),
+                reply(req, json!({"body": "aGVsbG8=", "base64Encoded": true})),
+            ],
+            _ => vec![reply(req, json!({}))],
+        });
+        let c = connect(&metro);
+        metro.send(json!({"method": "Network.requestWillBeSent", "params": {
+            "requestId": "r1", "timestamp": 10.0,
+            "request": {"method": "POST", "url": "https://api.test/login",
+                        "headers": {"Accept": "json"}, "postData": "{}"}}}));
+        metro.send(json!({"method": "Network.responseReceived", "params": {
+            "requestId": "r1",
+            "response": {"status": 201, "mimeType": "application/json", "headers": {"X": "1"}}}}));
+        metro.send(json!({"method": "Network.loadingFinished", "params": {
+            "requestId": "r1", "timestamp": 10.25, "encodedDataLength": 5}}));
+
+        let rec = wait_for(&c.rx, |e| match e {
+            RnEvent::Net(_, r) if r.res_body.is_some() => Some(r),
+            _ => None,
+        });
+        assert_eq!(rec.method, "POST");
+        assert_eq!(rec.url, "https://api.test/login");
+        assert_eq!(rec.req_headers, vec![("Accept".into(), "json".into())]);
+        assert_eq!(rec.req_body.as_deref(), Some("{}"));
+        assert_eq!(rec.status, Some(201));
+        assert_eq!(rec.mime_type.as_deref(), Some("application/json"));
+        assert_eq!(rec.res_body.as_deref(), Some("hello"));
+        assert_eq!(rec.size, Some(5));
+        assert_eq!(rec.duration_ms, Some(250.0));
+        log_text(&c.rx, "meanwhile");
+    }
+
+    #[test]
+    fn marks_failed_requests() {
+        let metro = FakeMetro::start();
+        let c = connect(&metro);
+        metro.send(json!({"method": "Network.requestWillBeSent", "params": {
+            "requestId": "r2", "request": {"url": "https://down.test"}}}));
+        metro.send(json!({"method": "Network.loadingFailed", "params": {
+            "requestId": "r2", "errorText": "net::ERR_CONNECTION_REFUSED"}}));
+        let rec = wait_for(&c.rx, |e| match e {
+            RnEvent::Net(_, r) if r.failed.is_some() => Some(r),
+            _ => None,
+        });
+        assert_eq!(rec.method, "GET");
+        assert_eq!(rec.failed.as_deref(), Some("net::ERR_CONNECTION_REFUSED"));
+    }
+
+    #[test]
+    fn collects_websocket_frames() {
+        let metro = FakeMetro::start();
+        let c = connect(&metro);
+        metro.send(json!({"method": "Network.webSocketCreated", "params": {
+            "requestId": "w1", "url": "wss://live.test"}}));
+        metro.send(json!({"method": "Network.webSocketFrameSent", "params": {
+            "requestId": "w1", "response": {"opcode": 1, "payloadData": "ping"}}}));
+        metro.send(
+            json!({"method": "Network.webSocketFrameReceived", "params": {
+            "requestId": "w1", "response": {"opcode": 2, "payloadData": "AAEC"}}}),
+        );
+        let rec = wait_for(&c.rx, |e| match e {
+            RnEvent::Net(_, r) if r.ws_frames.len() == 2 => Some(r),
+            _ => None,
+        });
+        assert!(rec.is_ws);
+        assert_eq!(rec.method, "WS");
+        assert_eq!(
+            rec.ws_frames,
+            vec![(true, "ping".into()), (false, "[binary 4 bytes]".into())]
+        );
+    }
+
+    #[test]
+    fn caps_console_object_expansion() {
+        // Every object has five object children, forever: without the budget
+        // one log line would cost thousands of round trips.
+        let metro = FakeMetro::with(|req| match req["method"].as_str() {
+            Some("Runtime.getProperties") => {
+                let id = req["params"]["objectId"].as_str().unwrap_or("");
+                let props: Vec<Value> = (0..5)
+                    .map(|i| {
+                        json!({"name": format!("k{i}"), "enumerable": true,
+                        "value": {"type": "object", "objectId": format!("{id}.{i}")}})
+                    })
+                    .collect();
+                vec![reply(req, json!({ "result": props }))]
+            }
+            _ => vec![reply(req, json!({}))],
+        });
+        let c = connect(&metro);
+        metro.send(json!({"method": "Runtime.consoleAPICalled", "params": {
+            "type": "log", "args": [{"type": "object", "objectId": "o", "description": "Object"}]}}));
+        let entry = log_text(&c.rx, "Object");
+        assert_eq!(metro.requests("Runtime.getProperties").len(), EXPAND_BUDGET);
+        let tree = entry.expanded.expect("expanded tree").join("\n");
+        assert!(tree.contains("k4: "), "{tree}");
+        assert!(tree.contains("\"{…}\""), "{tree}");
+    }
+
+    #[test]
+    fn expands_a_console_object_into_js() {
+        let metro = FakeMetro::with(|req| {
+            match req["method"].as_str() {
+            Some("Runtime.getProperties") => vec![reply(
+                req,
+                json!({"result": [
+                    {"name": "id", "enumerable": true, "value": {"type": "number", "value": 7}},
+                    {"name": "tags", "enumerable": true, "value": {"type": "object", "objectId": "t"}},
+                    {"name": "hidden", "enumerable": false, "value": {"type": "number", "value": 1}},
+                ]}),
+            )]
+            .into_iter()
+            .filter(|_| req["params"]["objectId"] == "o")
+            .chain((req["params"]["objectId"] == "t").then(|| {
+                reply(
+                    req,
+                    json!({"result": [
+                        {"name": "0", "enumerable": true, "value": {"type": "string", "value": "a"}},
+                        {"name": "length", "enumerable": false, "value": {"type": "number", "value": 1}},
+                    ]}),
+                )
+            }))
+            .collect(),
+            _ => vec![reply(req, json!({}))],
+        }
+        });
+        let c = connect(&metro);
+        metro.send(json!({"method": "Runtime.consoleAPICalled", "params": {
+            "type": "warn", "args": [
+                {"type": "string", "value": "user"},
+                {"type": "object", "objectId": "o",
+                 "preview": {"properties": [{"name": "id", "type": "number", "value": "7"}]}}]}}));
+        let entry = log_text(&c.rx, "user { id: 7 }");
+        assert_eq!(entry.level, "warn");
+        assert_eq!(
+            entry.expanded.unwrap(),
+            vec!["{", "  id: 7,", "  tags: [", "    \"a\"", "  ]", "}"]
+        );
+    }
+
+    #[test]
+    fn symbolicates_console_stacks_and_marks_framework_frames() {
+        let metro = FakeMetro::start();
+        metro.set_symbolicated(json!([
+            {"methodName": "onPress", "file": "/app/src/App.tsx", "lineNumber": 12},
+            {"methodName": "", "file": "/app/node_modules/react/x.js", "lineNumber": 3, "collapse": true},
+        ]));
+        let c = connect(&metro);
+        let mut ev = console("tapped");
+        ev["params"]["stackTrace"] = json!({"callFrames": [
+            {"functionName": "a", "url": "http://localhost/index.bundle", "lineNumber": 99, "columnNumber": 4},
+            {"functionName": "b", "url": "http://localhost/index.bundle", "lineNumber": 5, "columnNumber": 1},
+        ]});
+        metro.send(ev);
+        let entry = log_text(&c.rx, "tapped");
+        assert_eq!(
+            entry.stack.unwrap(),
+            vec![
+                "  at onPress (/app/src/App.tsx:12)".to_string(),
+                format!("{FRAMEWORK_FRAME}at <anonymous> (/app/node_modules/react/x.js:3)"),
+            ]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_bundle_positions_without_symbolication() {
+        let metro = FakeMetro::start();
+        let c = connect(&metro);
+        metro.send(json!({"method": "Runtime.exceptionThrown", "params": {"exceptionDetails": {
+            "text": "Uncaught", "exception": {"description": "TypeError: x is undefined"},
+            "stackTrace": {"callFrames": [
+                {"functionName": "", "url": "http://localhost:8081/index.bundle", "lineNumber": 41}]}}}}));
+        let entry = log_text(&c.rx, "TypeError: x is undefined");
+        assert_eq!(entry.level, "error");
+        assert_eq!(
+            entry.stack.unwrap(),
+            vec!["  at <anonymous> (index.bundle:42)"]
+        );
+    }
+
+    #[test]
+    fn passes_log_domain_entries_through() {
+        let metro = FakeMetro::start();
+        let c = connect(&metro);
+        metro.send(json!({"method": "Log.entryAdded", "params": {"entry": {
+            "level": "warning", "text": "slow frame"}}}));
+        assert_eq!(log_text(&c.rx, "slow frame").level, "warning");
+    }
+
+    #[test]
+    fn reports_a_pause_that_arrives_while_sampling_perf() {
+        // The perf sampler's evaluate is the first thing sent; Hermes pauses
+        // before replying. The pause must not be swallowed by the wait.
+        let metro = FakeMetro::with(|req| match req["method"].as_str() {
+            Some("Runtime.evaluate") => vec![
+                json!({"method": "Debugger.scriptParsed", "params": {
+                    "scriptId": "3", "url": "http://localhost:8081/index.bundle?platform=ios"}}),
+                json!({"method": "Debugger.paused", "params": {"reason": "other", "callFrames": [
+                    {"functionName": "f", "location": {"scriptId": "3", "lineNumber": 9, "columnNumber": 0}}]}}),
+                reply(req, json!({"result": {"value": 58}})),
+            ],
+            _ => vec![reply(req, json!({}))],
+        });
+        let c = connect(&metro);
+        let info = wait_for(&c.rx, |e| match e {
+            RnEvent::Paused(_, p) => Some(p),
+            _ => None,
+        });
+        assert_eq!(info.file, "http://localhost:8081/index.bundle?platform=ios");
+        assert_eq!(info.line, 10);
+        assert_eq!(info.reason, "other");
+        metro.send(json!({"method": "Debugger.resumed"}));
+        wait_for(&c.rx, |e| matches!(e, RnEvent::Resumed(_)).then_some(()));
+        // The bundle URL learned from scriptParsed is handed to the DAP server.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while c.bundle.lock().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "bundle URL not learned");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let fps = wait_for(&c.rx, |e| match e {
+            RnEvent::Perf(_, p) => Some(p.fps),
+            _ => None,
+        });
+        assert_eq!(fps, Some(58));
+    }
+
+    #[test]
+    fn answers_debug_requests_with_the_cdp_result() {
+        let metro = FakeMetro::with(|req| match req["method"].as_str() {
+            Some("Debugger.getScriptSource") => {
+                vec![reply(req, json!({"scriptSource": "var a = 1;"}))]
+            }
+            _ => vec![reply(req, json!({}))],
+        });
+        let c = connect(&metro);
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        c.cmd
+            .send(ConnCmd::DebugRequest {
+                method: "Debugger.getScriptSource".into(),
+                params: json!({"scriptId": "3"}),
+                reply: reply_tx,
+            })
+            .unwrap();
+        let result = reply_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(result["scriptSource"], "var a = 1;");
+        assert_eq!(
+            metro.requests("Debugger.getScriptSource")[0]["params"]["scriptId"],
+            "3"
+        );
+    }
+
+    #[test]
+    fn sends_ui_commands_to_the_target() {
+        let metro = FakeMetro::start();
+        let c = connect(&metro);
+        c.cmd.send(ConnCmd::Reload).unwrap();
+        c.cmd.send(ConnCmd::StepOver).unwrap();
+        c.cmd.send(ConnCmd::DiscardConsole).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while metro.requests("Log.clear").is_empty() {
+            assert!(Instant::now() < deadline, "commands not sent");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for m in [
+            "Page.reload",
+            "ReactNativeApplication.reload",
+            "Debugger.stepOver",
+            "Runtime.discardConsoleEntries",
+        ] {
+            assert_eq!(metro.requests(m).len(), 1, "{m}");
+        }
+    }
+
+    #[test]
+    fn clears_records_with_the_js_context() {
+        let metro = FakeMetro::start();
+        let c = connect(&metro);
+        metro.send(json!({"method": "Network.requestWillBeSent", "params": {
+            "requestId": "r3", "request": {"url": "https://a.test"}}}));
+        metro.send(json!({"method": "Runtime.executionContextsCleared"}));
+        // The record is gone: a late response for it is ignored.
+        metro.send(json!({"method": "Network.responseReceived", "params": {
+            "requestId": "r3", "response": {"status": 200}}}));
+        metro.send(json!({"method": "Runtime.executionContextCreated"}));
+        let mut saw_cleared = false;
+        wait_for(&c.rx, |e| match e {
+            RnEvent::ContextCleared(_) => {
+                saw_cleared = true;
+                None
+            }
+            RnEvent::Net(_, r) if r.status.is_some() => panic!("stale record updated"),
+            RnEvent::ContextCreated(_) => Some(()),
+            _ => None,
+        });
+        assert!(saw_cleared);
+    }
+
+    #[test]
+    fn attaches_to_a_new_target_quickly() {
+        // RN only reports network traffic once Network is enabled, so a
+        // freshly started app must be attached to within a poll or two.
+        let metro = FakeMetro::start();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let senders: Arc<Mutex<HashMap<String, Sender<ConnCmd>>>> = Arc::default();
+        let (port, s) = (metro.port, senders.clone());
+        std::thread::spawn(move || poll_loop(port, tx, s, Arc::default(), Arc::default()));
+        wait_for(&rx, |e| match e {
+            RnEvent::Targets(t) => t.is_empty().then_some(()),
+            _ => None,
+        });
+        let added = Instant::now();
+        metro.add_target("iPhone 16");
+        let key = wait_for(&rx, |e| match e {
+            RnEvent::Status(k, Status::Connected) => Some(k),
+            _ => None,
+        });
+        assert_eq!(key, "iPhone 16");
+        assert!(
+            added.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            added.elapsed()
+        );
+        assert!(senders.lock().unwrap().contains_key("iPhone 16"));
+        // Lost connections are dropped, so the next poll reconnects.
+        metro.close_all();
+        wait_for(&rx, |e| {
+            matches!(e, RnEvent::Status(_, Status::Disconnected)).then_some(())
+        });
+        wait_for(&rx, |e| {
+            matches!(e, RnEvent::Status(_, Status::Connected)).then_some(())
+        });
+    }
+
+    #[test]
+    fn formats_values_as_js() {
+        let v = json!({"a": [1, "x"], "b": {}, "c": null, "d": true, "e": []});
+        assert_eq!(
+            format_js(&v, ""),
+            "{\n  a: [\n    1,\n    \"x\"\n  ],\n  b: {},\n  c: null,\n  d: true,\n  e: []\n}"
+        );
+    }
+
+    #[test]
+    fn renders_console_args() {
+        assert_eq!(render_arg(&json!({"type": "string", "value": "hi"})), "hi");
+        assert_eq!(render_arg(&json!({"type": "number", "value": 3})), "3");
+        assert_eq!(render_arg(&json!({"type": "undefined"})), "undefined");
+        assert_eq!(
+            render_arg(&json!({"type": "function", "description": "function f() {}"})),
+            "function f() {}"
+        );
+        let arr = json!({"preview": {"subtype": "array", "properties": [
+            {"name": "0", "type": "number", "value": "1"},
+            {"name": "1", "type": "object", "valuePreview": {"properties": [
+                {"name": "x", "type": "string", "value": "y"}]}}]}});
+        assert_eq!(render_arg(&arr), "[1, { x: y }]");
+    }
+
+    #[test]
+    fn decodes_base64_bodies() {
+        assert_eq!(base64_lite::decode("aGVsbG8gd29ybGQ="), "hello world");
+        assert_eq!(base64_lite::decode("eyJhIjoxfQ=="), "{\"a\":1}");
+        assert_eq!(base64_lite::decode(""), "");
+    }
+}
