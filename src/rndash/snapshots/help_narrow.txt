@@ -1,0 +1,30 @@
+┌ Proces┌ Keys ────────────────────────────────────────────────────────┐───────┐
+│       │ Global                                                       │       │
+│Press  │   ⇥ / ⇧⇥      next / previous pane                           │       │
+│       │   ^←→↑↓       resize panes                                   │       │
+│       │   R           reload the app                                 │ UDID-1│
+│       │   D           open the dev menu                              │       │
+│       │   ?           this help                                      │       │
+│       │   q / ^C      quit                                           │       │
+│       │                                                              │       │
+│       │ Every pane                                                   │       │
+│       │   j k  ↑ ↓    move / scroll                                  │       │
+│       │   g  G        top / bottom                                   │pen · l│
+└───────│   space       autoscroll on/off                              │───────┘
+┌ JS Log│   [  ]        previous / next tab                            │───────┐
+│ … · … │                                                              │       │
+│       │ Processes                                                    │       │
+│       │   ⏎           type into the process (Esc leaves)             │       │
+│       │   x           stop it                                        │       │
+│       │   d           delete a stopped tab                           │       │
+│       │   m           start / restart Metro (takes over an external o│       │
+│       │   c           deep clean (reinstalls)                        │       │
+│       │   i           reinstall deps + pods                          │       │
+│       │   a           reset: deep clean, then Metro                  │       │
+│       │                                                              │       │
+│       │ Devices                                                      │       │
+│       │   ⏎           start the simulator / emulator                 │       │
+│       │   s           stop it                                        │       │
+│       │   b           build & run on it                              │       │
+└───────│   o           open the app                                   │───────┘
+ ⇥ focus└─────────────────────────────────────────────── ? / esc close ┘

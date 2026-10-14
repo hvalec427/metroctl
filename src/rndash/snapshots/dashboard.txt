@@ -1,0 +1,30 @@
+┌ Processes  no processes ─────────────────────────────────┐┌ Devices & Actions ───────────────────┐
+│                                                          ││Metro  ○ stopped  (m)                 │
+│Press  m  to start Metro.                                 ││                                      │
+│                                                          ││ iOS Simulators                       │
+│                                                          ││ ● iPhone 16  iOS 18.0                │
+│                                                          ││ ○ iPad Air  iOS 18.0                 │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│ ⏎ type · x stop · d delete · m metro · c clean · i instal││                                      │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────┘
+┌ JS Logs / Network / Perf ────────────────────────────────────────────────────────────────────────┐
+│ … · … · keeps logs on reload   [Logs (0)]  Network (0)   Perf                                    │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ⇥ focus · ^←→↑↓ resize · R reload · D dev-menu · ? keys · q quit

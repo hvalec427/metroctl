@@ -145,6 +145,8 @@ pub struct DashApp {
     sim_builds: Vec<(usize, String, bool)>, // build tabs → (device, android?), to point the app at our port
     ctl_rx: Receiver<control::Request>,
     socket: Option<PathBuf>, // control socket, when it could be bound
+    #[cfg(test)]
+    opened: Vec<(String, Option<String>)>, // run_on_device calls: (device, url)
 }
 
 /// What `signalbox up` asked for, applied once the dashboard opens.
@@ -395,6 +397,21 @@ impl DashApp {
         let (ctl_tx, ctl_rx) = std::sync::mpsc::channel();
         let path = control::socket_path();
         let socket = control::serve(&path, ctl_tx).ok().map(|_| path);
+        DashApp {
+            ctl_rx,
+            socket,
+            ..DashApp::bare(project, pinned, client, tx, rx)
+        }
+    }
+
+    /// The dashboard's state alone: no device poller, no control socket.
+    fn bare(
+        project: ProjectConfig,
+        pinned: Option<Pinned>,
+        client: RnClient,
+        tx: Sender<DashMsg>,
+        rx: Receiver<DashMsg>,
+    ) -> DashApp {
         let mut rnview = RnView::new(None);
         rnview.set_root(Some(project.root.clone()));
         rnview.set_embedded(true);
@@ -430,8 +447,10 @@ impl DashApp {
             term: Arc::new(AtomicBool::new(false)),
             delete_sim_on_quit: false,
             sim_builds: Vec::new(),
-            ctl_rx,
-            socket,
+            ctl_rx: std::sync::mpsc::channel().1,
+            socket: None,
+            #[cfg(test)]
+            opened: Vec::new(),
         }
     }
 
@@ -1265,6 +1284,12 @@ impl DashApp {
             "launching"
         };
         self.set_flash(format!("{verb} on {label}…"));
+        #[cfg(test)]
+        {
+            let _ = (tx, ios_bundle, android_pkg, target);
+            return self.opened.push((label, url));
+        }
+        #[cfg_attr(test, allow(unreachable_code))]
         std::thread::spawn(move || {
             let res = match (&url, target) {
                 (Some(u), OpenTarget::IosSim(udid)) => ios::open_url_on_simulator(&udid, u),
@@ -2583,5 +2608,463 @@ fn conv_color(c: vt100::Color) -> Option<Color> {
         vt100::Color::Default => None,
         vt100::Color::Idx(i) => Some(Color::Indexed(i)),
         vt100::Color::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    const LINKS: &str = r#"[
+        {"name": "Home", "url": "app://home", "group": "Main"},
+        {"name": "Settings", "url": "app://settings", "group": "Main"},
+        {"name": "Order", "url": "app://order/<orderId>", "group": "Orders"},
+        {"name": "Track order", "url": "app://order/{orderId}/track?driver=<driver>", "group": "Orders"},
+        "app://plain"
+    ]"#;
+
+    fn project(links: &str) -> ProjectConfig {
+        let json = format!(r#"{{"name": "App", "root": "/tmp/app", "deeplinks": {links}}}"#);
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn app_with(project: ProjectConfig, pinned: Option<Pinned>) -> DashApp {
+        let (tx, rx) = std::sync::mpsc::channel();
+        DashApp::bare(project, pinned, RnClient::idle(), tx, rx)
+    }
+
+    /// The dashboard with LINKS, a booted simulator selected in the Devices pane.
+    fn app() -> DashApp {
+        let mut app = app_with(project(LINKS), None);
+        app.devices = vec![
+            sim("iPhone 16  iOS 18.0", true),
+            sim("iPad Air  iOS 18.0", false),
+        ];
+        app.focus = Pane::Devices;
+        app
+    }
+
+    fn sim(label: &str, running: bool) -> DeviceRow {
+        let udid = format!("UDID-{}", label.len());
+        DeviceRow {
+            label: label.into(),
+            id: udid.clone(),
+            platform: Platform::Ios,
+            running,
+            boot: Some(BootTarget::IosSim(udid.clone())),
+            open: running.then_some(OpenTarget::IosSim(udid)),
+            installed: None,
+            foreground: None,
+            detail: None,
+            problem: None,
+            pinned: false,
+        }
+    }
+
+    fn press(app: &mut DashApp, keys: &str) {
+        for c in keys.chars() {
+            app.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+    }
+
+    fn key(app: &mut DashApp, code: KeyCode) {
+        app.on_key(KeyEvent::from(code));
+    }
+
+    fn ctrl(app: &mut DashApp, code: KeyCode) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::CONTROL));
+    }
+
+    fn opened(app: &DashApp) -> Vec<Option<String>> {
+        app.opened.iter().map(|(_, u)| u.clone()).collect()
+    }
+
+    fn flash(app: &DashApp) -> Option<&str> {
+        app.flash.as_ref().map(|(f, _)| f.as_str())
+    }
+
+    fn screen(app: &mut DashApp, w: u16, h: u16) -> String {
+        let mut term = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| render(app, f)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| {
+                let row: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
+                row.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    /// Compare the rendered screen to `src/rndash/snapshots/<name>.txt`
+    /// (UPDATE_SNAPSHOTS=1 rewrites it).
+    fn snapshot(name: &str, app: &mut DashApp, w: u16, h: u16) {
+        let got = screen(app, w, h);
+        let path = format!(
+            "{}/src/rndash/snapshots/{name}.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
+            std::fs::write(&path, &got).unwrap();
+            return;
+        }
+        let want = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("missing {path}; run with UPDATE_SNAPSHOTS=1"));
+        assert!(got == want, "{name} changed:\n{got}");
+    }
+
+    #[test]
+    fn dashboard_layout() {
+        let mut app = app();
+        app.focus = Pane::Processes;
+        snapshot("dashboard", &mut app, 100, 30);
+        key(&mut app, KeyCode::Tab);
+        snapshot("dashboard_devices_focused", &mut app, 100, 30);
+    }
+
+    #[test]
+    fn ctrl_arrows_resize_the_panes() {
+        let mut app = app();
+        ctrl(&mut app, KeyCode::Right);
+        ctrl(&mut app, KeyCode::Up);
+        snapshot("dashboard_resized", &mut app, 100, 30);
+        for _ in 0..20 {
+            ctrl(&mut app, KeyCode::Left);
+            ctrl(&mut app, KeyCode::Down);
+        }
+        assert_eq!((app.h_split, app.v_split), (20, 80));
+    }
+
+    #[test]
+    fn tab_cycles_the_panes() {
+        let mut app = app();
+        app.focus = Pane::Processes;
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Tab);
+        assert!(app.focus == Pane::Logs);
+        key(&mut app, KeyCode::Tab);
+        assert!(app.focus == Pane::Processes);
+        key(&mut app, KeyCode::BackTab);
+        assert!(app.focus == Pane::Logs);
+    }
+
+    #[test]
+    fn links_need_a_running_device() {
+        let mut app = app();
+        key(&mut app, KeyCode::Down); // the iPad, not booted
+        press(&mut app, "l");
+        assert_eq!(flash(&app), Some("start the device first (⏎)"));
+        assert!(!screen(&mut app, 100, 30).contains("Deep links"));
+    }
+
+    #[test]
+    fn picker_lists_links_under_their_groups() {
+        let mut app = app();
+        press(&mut app, "l");
+        snapshot("link_picker", &mut app, 100, 30);
+    }
+
+    #[test]
+    fn picker_key_opens_that_link() {
+        let mut app = app();
+        press(&mut app, "l2");
+        assert_eq!(opened(&app), vec![Some("app://settings".to_string())]);
+        assert_eq!(app.opened[0].0, "iPhone 16  iOS 18.0");
+        assert_eq!(flash(&app), Some("opening on iPhone 16  iOS 18.0…"));
+        assert!(!screen(&mut app, 100, 30).contains("Deep links"));
+    }
+
+    #[test]
+    fn picker_ignores_keys_past_the_last_link() {
+        let mut app = app();
+        press(&mut app, "l9x");
+        assert!(opened(&app).is_empty());
+        key(&mut app, KeyCode::Esc);
+        assert!(!screen(&mut app, 100, 30).contains("Deep links"));
+        press(&mut app, "5"); // picker closed: nothing opens
+        assert!(opened(&app).is_empty());
+    }
+
+    #[test]
+    fn picker_keys_run_from_digits_to_letters_to_capitals() {
+        let links: Vec<String> = (0..64).map(|i| format!("\"app://l/{i}\"")).collect();
+        let mut app = app_with(project(&format!("[{}]", links.join(","))), None);
+        app.devices = vec![sim("iPhone 16  iOS 18.0", true)];
+        app.focus = Pane::Devices;
+        for (keys, want) in [
+            ("l1", 0),
+            ("l9", 8),
+            ("la", 9),
+            ("lz", 34),
+            ("lA", 35),
+            ("lZ", 60),
+        ] {
+            press(&mut app, keys);
+            assert_eq!(
+                opened(&app).last().unwrap().as_deref(),
+                Some(format!("app://l/{want}").as_str()),
+                "{keys}"
+            );
+        }
+        // Links past Z have no key: only search reaches them.
+        press(&mut app, "l");
+        let s = screen(&mut app, 100, 80);
+        assert!(s.contains("app://l/60") && !s.contains("app://l/61"), "{s}");
+        press(&mut app, "/l/63");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(opened(&app).last().unwrap().as_deref(), Some("app://l/63"));
+    }
+
+    #[test]
+    fn tall_picker_splits_into_two_columns_at_a_heading() {
+        let mut links = Vec::new();
+        for g in ["Auth", "Shop", "Account"] {
+            for i in 0..6 {
+                links.push(format!(
+                    r#"{{"name": "{g} {i}", "url": "app://{g}/{i}", "group": "{g}"}}"#
+                ));
+            }
+        }
+        let mut app = app_with(project(&format!("[{}]", links.join(","))), None);
+        app.devices = vec![sim("iPhone 16  iOS 18.0", true)];
+        app.focus = Pane::Devices;
+        press(&mut app, "l");
+        snapshot("link_picker_two_columns", &mut app, 140, 24);
+        // Narrow terminals keep one (clipped) column.
+        snapshot("link_picker_narrow", &mut app, 100, 24);
+    }
+
+    #[test]
+    fn search_filters_by_name_or_url() {
+        let mut app = app();
+        press(&mut app, "l/ORD");
+        snapshot("link_search", &mut app, 100, 30);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Down); // stays on the last match
+        snapshot("link_search_second", &mut app, 100, 30);
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Up);
+        press(&mut app, "x"); // no matches: Enter does nothing
+        key(&mut app, KeyCode::Enter);
+        assert!(opened(&app).is_empty());
+        assert!(screen(&mut app, 100, 30).contains("/   ORDx█"));
+        ctrl(&mut app, KeyCode::Char('u'));
+        press(&mut app, "plain");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(opened(&app), vec![Some("app://plain".to_string())]);
+    }
+
+    #[test]
+    fn backspace_and_esc_leave_search_then_the_picker() {
+        let mut app = app();
+        press(&mut app, "l/s");
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Backspace); // empty query: back to the plain picker
+        let s = screen(&mut app, 100, 30);
+        assert!(s.contains("Deep links") && s.contains(" /   search"), "{s}");
+        press(&mut app, "/");
+        key(&mut app, KeyCode::Esc);
+        assert!(screen(&mut app, 100, 30).contains(" /   search"));
+        key(&mut app, KeyCode::Esc);
+        assert!(!screen(&mut app, 100, 30).contains("Deep links"));
+    }
+
+    #[test]
+    fn placeholders_are_asked_for_then_filled_in() {
+        let mut app = app();
+        press(&mut app, "l4");
+        assert!(opened(&app).is_empty());
+        snapshot("link_form", &mut app, 100, 30);
+        press(&mut app, "4 2");
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Backspace);
+        press(&mut app, "2");
+        key(&mut app, KeyCode::Enter); // next field
+        key(&mut app, KeyCode::Enter); // empty value: refused
+        assert_eq!(flash(&app), Some("fill in every value"));
+        press(&mut app, "ana b");
+        snapshot("link_form_filled", &mut app, 100, 30);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            opened(&app),
+            vec![Some("app://order/42/track?driver=ana%20b".to_string())]
+        );
+        // Values are remembered per placeholder name.
+        press(&mut app, "l3");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(opened(&app)[1].as_deref(), Some("app://order/42"));
+    }
+
+    #[test]
+    fn form_fields_cycle_and_clear() {
+        let mut app = app();
+        press(&mut app, "l4");
+        press(&mut app, "1");
+        key(&mut app, KeyCode::Tab);
+        press(&mut app, "x");
+        key(&mut app, KeyCode::Tab); // wraps to the first field
+        ctrl(&mut app, KeyCode::Char('u'));
+        press(&mut app, "7");
+        key(&mut app, KeyCode::BackTab); // wraps to the last
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            opened(&app),
+            vec![Some("app://order/7/track?driver=x".into())]
+        );
+        press(&mut app, "l4");
+        key(&mut app, KeyCode::Esc);
+        assert!(!screen(&mut app, 100, 30).contains("Track order") && opened(&app).len() == 1);
+    }
+
+    #[test]
+    fn colon_opens_a_pasted_url_as_is() {
+        let mut app = app();
+        press(&mut app, "l:");
+        app.on_paste("  https://auth.test/magic?token=a b&x=1\n");
+        snapshot("link_paste_url", &mut app, 100, 30);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            opened(&app),
+            vec![Some("https://auth.test/magic?token=a b&x=1".into())]
+        );
+    }
+
+    #[test]
+    fn long_form_values_show_their_end() {
+        let mut app = app();
+        press(&mut app, "l:");
+        app.on_paste(&format!("https://x.test/{}end", "a".repeat(120)));
+        let s = screen(&mut app, 100, 30);
+        assert!(s.contains("aaaend█"), "{s}");
+    }
+
+    #[test]
+    fn link_opens_on_a_stopped_device_flash() {
+        let mut app = app();
+        press(&mut app, "l");
+        app.devices[0].open = None; // shut down while the picker was open
+        press(&mut app, "1");
+        assert!(opened(&app).is_empty());
+        assert_eq!(
+            flash(&app),
+            Some("iPhone 16  iOS 18.0 isn't running — start it first (⏎)")
+        );
+    }
+
+    #[test]
+    fn help_popup_scrolls_and_clamps() {
+        let mut app = app();
+        press(&mut app, "?");
+        snapshot("help_wide", &mut app, 130, 40);
+        snapshot("help_narrow", &mut app, 80, 30);
+        press(&mut app, "G");
+        snapshot("help_narrow_bottom", &mut app, 80, 30);
+        press(&mut app, "kkg");
+        assert_eq!(app.help, Some(0));
+        press(&mut app, "jj");
+        assert_eq!(app.help, Some(2));
+        press(&mut app, "q");
+        assert!(app.help.is_none() && !app.confirm_quit);
+    }
+
+    #[test]
+    fn quit_asks_first() {
+        let mut app = app();
+        press(&mut app, "q");
+        snapshot("quit", &mut app, 100, 30);
+        press(&mut app, "n");
+        assert!(!app.confirm_quit && !app.quit);
+        ctrl(&mut app, KeyCode::Char('c'));
+        assert!(app.confirm_quit);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.quit && !app.delete_sim_on_quit);
+    }
+
+    #[test]
+    fn quit_offers_to_delete_a_created_simulator() {
+        let pinned = Pinned {
+            udid: "UDID-19".into(),
+            created: true,
+            simulator: true,
+            android: false,
+            cleanup: SimCleanup::Ask,
+            name: None,
+        };
+        let mut app = app_with(project(LINKS), Some(pinned));
+        let mut row = sim("iPhone 16  iOS 18.0", true);
+        row.pinned = true;
+        app.devices = vec![row];
+        press(&mut app, "q");
+        snapshot("quit_created_sim", &mut app, 100, 30);
+        press(&mut app, "d");
+        assert!(app.quit && app.delete_sim_on_quit);
+    }
+
+    #[test]
+    fn enter_on_an_empty_process_tab_flashes() {
+        let mut app = app();
+        app.focus = Pane::Processes;
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(flash(&app), Some("no running process in this tab"));
+        assert!(!app.input_mode);
+    }
+
+    #[test]
+    fn keys_become_terminal_bytes() {
+        let k = |code, m| key_to_bytes(KeyEvent::new(code, m));
+        assert_eq!(k(KeyCode::Char('c'), KeyModifiers::CONTROL), Some(vec![3]));
+        assert_eq!(k(KeyCode::Char('C'), KeyModifiers::CONTROL), Some(vec![3]));
+        assert_eq!(k(KeyCode::Char('é'), KeyModifiers::NONE), Some("é".into()));
+        assert_eq!(k(KeyCode::Enter, KeyModifiers::NONE), Some(vec![b'\r']));
+        assert_eq!(k(KeyCode::Backspace, KeyModifiers::NONE), Some(vec![0x7f]));
+        assert_eq!(k(KeyCode::Up, KeyModifiers::NONE), Some(b"\x1b[A".to_vec()));
+        assert_eq!(
+            k(KeyCode::Delete, KeyModifiers::NONE),
+            Some(b"\x1b[3~".to_vec())
+        );
+        assert_eq!(k(KeyCode::F(1), KeyModifiers::NONE), None);
+    }
+
+    #[test]
+    fn picker_keys_round_trip() {
+        for i in 0..61 {
+            assert_eq!(picker_index(picker_char(i).unwrap()), Some(i));
+        }
+        assert_eq!(picker_char(61), None);
+        assert_eq!(picker_index('0'), None);
+    }
+
+    #[test]
+    fn pty_screen_keeps_colors_and_attributes() {
+        let parser = Arc::new(std::sync::Mutex::new(vt100::Parser::new(3, 10, 0)));
+        parser
+            .lock()
+            .unwrap()
+            .process(b"\x1b[1;31mred\x1b[0m ok\r\n\x1b[38;2;1;2;3;4mrgb");
+        let lines = pty_lines(&parser, 8, 4);
+        assert_eq!(lines.len(), 4);
+        let first = &lines[0].spans;
+        assert_eq!(first[0].content, "red");
+        assert_eq!(
+            first[0].style,
+            Style::default()
+                .fg(Color::Indexed(1))
+                .add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(first[1].content, " ok  ");
+        assert_eq!(first[1].style, Style::default());
+        assert_eq!(lines[1].spans[0].content, "rgb");
+        assert_eq!(
+            lines[1].spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(1, 2, 3))
+                .add_modifier(Modifier::UNDERLINED)
+        );
+        assert_eq!(lines[3].width(), 0);
     }
 }

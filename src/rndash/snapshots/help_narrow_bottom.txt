@@ -1,0 +1,30 @@
+┌ Proces┌ Keys ────────────────────────────────────────────────────────┐───────┐
+│       │ Logs · Network · Perf                                        │       │
+│Press  │   1-9         switch device                                  │       │
+│       │   /  n N      search, next / previous match                  │       │
+│       │   f           filter                                         │ UDID-1│
+│       │   ⏎           open the entry                                 │       │
+│       │   z           open maximized / toggle split                  │       │
+│       │   V           visual select, then y                          │       │
+│       │   y           copy                                           │       │
+│       │   c           clear                                          │       │
+│       │   p           clear on reload on/off                         │       │
+│       │                                                              │pen · l│
+└───────│ Open entry                                                   │───────┘
+┌ JS Log│   ⏎ / Esc     close                                          │───────┐
+│ … · … │   J K         scroll the entry (split view)                  │       │
+│       │   {  }        previous / next section                        │       │
+│       │   o           open file:line in nvim                         │       │
+│       │   F           show framework stack frames                    │       │
+│       │                                                              │       │
+│       │ Network                                                      │       │
+│       │   e           errors only                                    │       │
+│       │   m           cycle method filter                            │       │
+│       │   c / C       copy as curl                                   │       │
+│       │                                                              │       │
+│       │ Debugger (paused)                                            │       │
+│       │   F5          continue                                       │       │
+│       │   F10         step over                                      │       │
+│       │   F11 / ⇧F11  step into / out                                │       │
+└───────│   F6          pause                                          │───────┘
+ ⇥ focus└─────────────────────────────────────────────── ? / esc close ┘

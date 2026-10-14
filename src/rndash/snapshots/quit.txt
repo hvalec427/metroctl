@@ -1,0 +1,30 @@
+┌ Processes  no processes ─────────────────────────────────┐┌ Devices & Actions ───────────────────┐
+│                                                          ││Metro  ○ stopped  (m)                 │
+│Press  m  to start Metro.                                 ││                                      │
+│                                                          ││ iOS Simulators                       │
+│                                                          ││ ● iPhone 16  iOS 18.0  UDID-19       │
+│                                                          ││ ○ iPad Air  iOS 18.0                 │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│                                                          ││ s stop · b build · o open · l links  │
+└────────────────────────┌ Quit signalbox? ───────────────────────────────┐────────────────────────┘
+┌ JS Logs / Network / Per│                                                │────────────────────────┐
+│ … · … · keeps logs on r│  This stops Metro and any running builds.      │                        │
+│                        │  y/⏎ quit    n/esc cancel                      │                        │
+│                        └────────────────────────────────────────────────┘                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ⇥ focus · ^←→↑↓ resize · R reload · D dev-menu · ? keys · q quit

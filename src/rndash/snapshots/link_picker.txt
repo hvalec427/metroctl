@@ -1,0 +1,30 @@
+┌ Processes  no processes ─────────────────────────────────┐┌ Devices & Actions ───────────────────┐
+│                                                          ││Metro  ○ stopped  (m)                 │
+│Press  m  to start Metro.                                 ││                                      │
+│                                                          ││ iOS Simulators                       │
+│                                                          ││ ● iPhone 16  iOS 18.0  UDID-19       │
+│                                                          ││ ○ iPad Air  iOS 18.0                 │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│                                                          ││                                      │
+│                 ┌ Deep links · esc ────────────────────────────────────────────┐                 │
+│                 │ Main                                                         │                 │
+│                 │ 1   Home                                                     │ open · l links  │
+└─────────────────│ 2   Settings                                                 │─────────────────┘
+┌ JS Logs / Networ│                                                              │─────────────────┐
+│ … · … · keeps lo│ Orders                                                       │                 │
+│                 │ 3   Order ‹orderId›                                          │                 │
+│                 │ 4   Track order ‹orderId› ‹driver›                           │                 │
+│                 │ 5   app://plain                                              │                 │
+│                 │                                                              │                 │
+│                 │ /   search     :   paste any URL (e.g. a magic login link)   │                 │
+│                 └──────────────────────────────────────────────────────────────┘                 │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ⇥ focus · ^←→↑↓ resize · R reload · D dev-menu · ? keys · q quit

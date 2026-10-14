@@ -223,6 +223,16 @@ impl RnClient {
         }
     }
 
+    /// A client that never connects: no Metro polling, no DAP server.
+    #[cfg(test)]
+    pub fn idle() -> RnClient {
+        RnClient {
+            rx: std::sync::mpsc::channel().1,
+            cmd_senders: Arc::default(),
+            dap_error: None,
+        }
+    }
+
     pub fn send(&self, key: &str, cmd: ConnCmd) {
         if let Some(s) = self.cmd_senders.lock().unwrap().get(key) {
             let _ = s.send(cmd);
