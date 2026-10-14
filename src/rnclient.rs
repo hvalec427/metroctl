@@ -38,7 +38,10 @@ fn cdp_trace(tag: &str, msg: &str) {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
             let trimmed: String = msg.chars().take(600).collect();
-            let _ = writeln!(f, "{tag} {trimmed}");
+            // Events put "method" last (after any request "method": "POST"), so it is
+            // often cut off above.
+            let method = msg.rfind("\"method\":\"").and_then(|i| msg[i + 10..].split('"').next()).unwrap_or("");
+            let _ = writeln!(f, "{tag} [{method}] {trimmed}");
         }
     }
 }
@@ -230,7 +233,10 @@ fn poll_loop(port: u16, tx: Sender<RnEvent>, senders: Arc<Mutex<HashMap<String, 
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(3000));
+        // RN reports network traffic only while a debugger has Network enabled —
+        // nothing is buffered — so every moment before we attach to a freshly
+        // started app is requests lost for good. Poll fast.
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
