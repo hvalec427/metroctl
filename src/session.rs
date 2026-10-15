@@ -336,7 +336,11 @@ impl Claim {
 
     fn port_in(dir: &Path, pid: u32, root: &Path, start: u16, auto: bool) -> Result<Claim> {
         let _lock = DirLock::acquire(&dir.join("claims.lock"), Duration::from_secs(60));
-        let port = if auto { free_port_in(dir, start)? } else { start };
+        let port = if auto {
+            free_port_in(dir, start)?
+        } else {
+            start
+        };
         let entry = SessionFile {
             pid,
             root: root.display().to_string(),
@@ -350,7 +354,10 @@ impl Claim {
             detached: detached(),
         };
         register_in(dir, &entry);
-        Ok(Claim { dir: dir.to_path_buf(), entry })
+        Ok(Claim {
+            dir: dir.to_path_buf(),
+            entry,
+        })
     }
 
     pub fn port_number(&self) -> u16 {
@@ -1165,9 +1172,12 @@ mod tests {
 
     /// A registry dir of its own, and live processes to claim as.
     fn claim_setup(name: &str) -> (PathBuf, Vec<std::process::Child>) {
-        let dir = std::env::temp_dir().join(format!("signalbox-claims-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("signalbox-claims-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let kids = (0..2).map(|_| Command::new("sleep").arg("30").spawn().unwrap()).collect();
+        let kids = (0..2)
+            .map(|_| Command::new("sleep").arg("30").spawn().unwrap())
+            .collect();
         (dir, kids)
     }
 
@@ -1183,7 +1193,9 @@ mod tests {
             .map(|k| {
                 let (dir, pid) = (dir.clone(), k.id());
                 std::thread::spawn(move || {
-                    Claim::port_in(&dir, pid, Path::new("/wt"), start, true).unwrap().port_number()
+                    Claim::port_in(&dir, pid, Path::new("/wt"), start, true)
+                        .unwrap()
+                        .port_number()
                 })
             })
             .collect::<Vec<_>>()
@@ -1204,7 +1216,10 @@ mod tests {
         let mut b = Claim::port_in(&dir, kids[1].id(), Path::new("/b"), 9001, false).unwrap();
         a.device("SIM-1", false).unwrap();
         let err = b.device("SIM-1", false).unwrap_err().to_string();
-        assert!(err.contains("in use by the signalbox session in /a"), "{err}");
+        assert!(
+            err.contains("in use by the signalbox session in /a"),
+            "{err}"
+        );
         b.device("SIM-2", false).unwrap();
         // Once its holder is gone, it's free again.
         kids[0].kill().unwrap();

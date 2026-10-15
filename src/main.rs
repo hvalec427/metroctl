@@ -182,7 +182,8 @@ fn main() {
             detach,
         }) => {
             if detach {
-                let args: Vec<String> = std::env::args().skip_while(|a| a != "up").skip(1).collect();
+                let args: Vec<String> =
+                    std::env::args().skip_while(|a| a != "up").skip(1).collect();
                 commands_rn::detach(args);
                 return;
             }
@@ -211,7 +212,10 @@ fn main() {
                 prebuilt,
             })
         }
-        Some(Command::Down { keep_sim, detached_only }) => commands_rn::down(keep_sim, detached_only),
+        Some(Command::Down {
+            keep_sim,
+            detached_only,
+        }) => commands_rn::down(keep_sim, detached_only),
         Some(Command::Sim {
             action:
                 SimAction::New {

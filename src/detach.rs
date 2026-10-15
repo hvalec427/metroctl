@@ -26,7 +26,11 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
         bail!("--detach runs the dashboard in tmux, which isn't installed (brew install tmux)");
     }
     let exe = std::env::current_exe()?.display().to_string();
-    let name = root.file_name().and_then(|n| n.to_str()).unwrap_or("app").to_string();
+    let name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("app")
+        .to_string();
     // The window closes when signalbox stops (or is stopped); on an error it
     // stays, so the output can be read.
     let cmd = format!(
@@ -52,7 +56,9 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
             println!("{} · tmux -L {TMUX} window {name}", describe(&s));
             return Ok(());
         }
-        let screen = tmux().args(["capture-pane", "-p", "-t", &pane, "-S", "-60"]).output();
+        let screen = tmux()
+            .args(["capture-pane", "-p", "-t", &pane, "-S", "-60"])
+            .output();
         match screen {
             Ok(o) if o.status.success() => {
                 let text = String::from_utf8_lossy(&o.stdout).to_string();
@@ -65,7 +71,10 @@ pub fn run(args: &[String], root: &Path) -> Result<()> {
             _ => return Err(anyhow!("signalbox up stopped before its session started")),
         }
         if t.elapsed() > TIMEOUT {
-            bail!("no session after {} minutes; see its window: tmux -L {TMUX} attach", TIMEOUT.as_secs() / 60);
+            bail!(
+                "no session after {} minutes; see its window: tmux -L {TMUX} attach",
+                TIMEOUT.as_secs() / 60
+            );
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -94,12 +103,18 @@ fn open(name: &str, root: &Path, cmd: &str, window: bool) -> Result<std::process
             t.arg("-e").arg(format!("{var}={v}"));
         }
     }
-    t.arg("-c").arg(root).arg(cmd).output().context("running tmux")
+    t.arg("-c")
+        .arg(root)
+        .arg(cmd)
+        .output()
+        .context("running tmux")
 }
 
 /// The checkout's session, if it's live and was written after `since`.
 fn fresh_session(root: &Path, since: SystemTime) -> Option<SessionFile> {
-    let modified = std::fs::metadata(session::session_path(root)).and_then(|m| m.modified()).ok()?;
+    let modified = std::fs::metadata(session::session_path(root))
+        .and_then(|m| m.modified())
+        .ok()?;
     let s = session::read_session(root)?;
     (modified >= since && session::pid_alive(s.pid)).then_some(s)
 }
@@ -121,7 +136,10 @@ fn quote(s: &str) -> String {
 /// throwaway simulators deleted when it stops (nobody is there to be asked).
 pub fn up_args(all: &[String]) -> Vec<String> {
     let mut args: Vec<String> = all.iter().filter(|a| *a != "--detach").cloned().collect();
-    if !args.iter().any(|a| a == "--sim-cleanup" || a.starts_with("--sim-cleanup=")) {
+    if !args
+        .iter()
+        .any(|a| a == "--sim-cleanup" || a.starts_with("--sim-cleanup="))
+    {
         args.extend(["--sim-cleanup".into(), "delete".into()]);
     }
     args
@@ -137,9 +155,18 @@ mod tests {
 
     #[test]
     fn detached_args() {
-        assert_eq!(up_args(&v(&["--detach", "--port", "auto", "--new-sim"])), v(&["--port", "auto", "--new-sim", "--sim-cleanup", "delete"]));
-        assert_eq!(up_args(&v(&["--new-sim", "--sim-cleanup", "keep", "--detach"])), v(&["--new-sim", "--sim-cleanup", "keep"]));
-        assert_eq!(up_args(&v(&["--sim-cleanup=keep"])), v(&["--sim-cleanup=keep"]));
+        assert_eq!(
+            up_args(&v(&["--detach", "--port", "auto", "--new-sim"])),
+            v(&["--port", "auto", "--new-sim", "--sim-cleanup", "delete"])
+        );
+        assert_eq!(
+            up_args(&v(&["--new-sim", "--sim-cleanup", "keep", "--detach"])),
+            v(&["--new-sim", "--sim-cleanup", "keep"])
+        );
+        assert_eq!(
+            up_args(&v(&["--sim-cleanup=keep"])),
+            v(&["--sim-cleanup=keep"])
+        );
     }
 
     #[test]

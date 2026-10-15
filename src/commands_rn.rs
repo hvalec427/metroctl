@@ -133,7 +133,11 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
 
 /// `signalbox up --detach` — `up` in a tmux window (see `detach.rs`).
 pub fn detach(args: Vec<String>) {
-    let Some(project) = load_rn_config().ok().flatten().and_then(|c| current_project(&c)) else {
+    let Some(project) = load_rn_config()
+        .ok()
+        .flatten()
+        .and_then(|c| current_project(&c))
+    else {
         eprintln!("This directory isn't a registered React Native project (or a worktree of one).");
         eprintln!("Run `signalbox init` in the main checkout first.");
         std::process::exit(1);
