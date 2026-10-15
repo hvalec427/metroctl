@@ -77,7 +77,7 @@ enum Command {
         #[arg(long)]
         detach: bool,
     },
-    /// Simulator helpers for tools that manage their own simulators (e.g. orc)
+    /// Simulator helpers for tools that manage their own simulators
     Sim {
         #[command(subcommand)]
         action: SimAction,

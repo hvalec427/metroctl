@@ -1,7 +1,7 @@
 //! `signalbox up`: a dashboard session set up for one checkout (usually a git
 //! worktree): its own Metro port, its own simulator, built and running on
 //! start. The session is described in `<root>/.signalbox/session.json` so other
-//! tools (orc, `signalbox down`) can find the port, simulator and process.
+//! tools (agents, `signalbox down`) can find the port, simulator and process.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
