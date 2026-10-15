@@ -71,9 +71,10 @@ enum Command {
         /// building; JS still comes from this checkout's Metro. Falls back to building.
         #[arg(long)]
         prebuilt: bool,
-        /// Run in a window of the tmux session "signalbox" and return once the session is up,
-        /// printing its port and device (for agents, which have no terminal). A simulator it
-        /// creates is deleted when it stops, unless --sim-cleanup says otherwise.
+        /// Run in a tmux server of signalbox's own (`tmux -L signalbox attach` to watch) and
+        /// return once the session is up, printing its port and device (for agents, which have
+        /// no terminal). A simulator it creates is deleted when it stops, unless --sim-cleanup
+        /// says otherwise.
         #[arg(long)]
         detach: bool,
     },
