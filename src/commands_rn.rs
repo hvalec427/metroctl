@@ -51,11 +51,15 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
     for d in session::reap_stale() {
         eprintln!("{d}");
     }
-    match opts.port {
-        Some(Some(p)) => project.set_metro_port(p),
-        Some(None) => project.set_metro_port(session::free_port(project.metro_port())?),
-        None => {}
-    }
+    // The port (and below, the device) are claimed for this session right
+    // away, so `up`s started together never share them.
+    let root = std::path::PathBuf::from(&project.root);
+    let mut claim = match opts.port {
+        Some(Some(p)) => session::Claim::port(&root, p, false)?,
+        Some(None) => session::Claim::port(&root, project.metro_port(), true)?,
+        None => session::Claim::port(&root, project.metro_port(), false)?,
+    };
+    project.set_metro_port(claim.port_number());
     let cleanup = opts.sim_cleanup.unwrap_or(SimCleanup::Ask);
     let pinned = if let Some(name) = &opts.new_sim {
         let name = name
@@ -68,6 +72,7 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
             opts.sim_type.as_deref(),
         )?;
         eprintln!("created {desc} ({udid})");
+        claim.device(&udid, true)?;
         Some(Pinned {
             udid,
             created: true,
@@ -79,6 +84,7 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
     } else if let Some(avd) = &opts.new_emulator {
         let (serial, avd) = session::start_emulator(avd.as_deref())?;
         eprintln!("started {avd} ({serial})");
+        claim.device(&serial, true)?;
         Some(Pinned {
             udid: serial,
             created: true,
@@ -88,10 +94,15 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
             name: Some(avd),
         })
     } else {
-        opts.device
+        let pinned = opts
+            .device
             .as_deref()
             .map(|id| session::pin_device(id, cleanup))
-            .transpose()?
+            .transpose()?;
+        if let Some(p) = &pinned {
+            claim.device(&p.udid, false)?;
+        }
+        pinned
     };
     let up = opts.port.is_some() || pinned.is_some() || opts.install;
     // --prebuilt: the main checkout's last simulator build, when there is one.
@@ -118,6 +129,20 @@ fn prepare(project: &mut ProjectConfig, opts: &UpOpts) -> anyhow::Result<Setup> 
         start: up,
         prebuilt,
     })
+}
+
+/// `signalbox up --detach` — `up` in a tmux window (see `detach.rs`).
+pub fn detach(args: Vec<String>) {
+    let Some(project) = load_rn_config().ok().flatten().and_then(|c| current_project(&c)) else {
+        eprintln!("This directory isn't a registered React Native project (or a worktree of one).");
+        eprintln!("Run `signalbox init` in the main checkout first.");
+        std::process::exit(1);
+    };
+    let root = std::path::PathBuf::from(project.root);
+    if let Err(e) = crate::detach::run(&crate::detach::up_args(&args), &root) {
+        eprintln!("{e:#}");
+        std::process::exit(1);
+    }
 }
 
 /// `signalbox down` — stop the session running in this checkout.

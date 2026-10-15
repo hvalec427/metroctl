@@ -148,8 +148,11 @@ fn global_dir() -> PathBuf {
 }
 
 fn register_global(s: &SessionFile) {
-    let dir = global_dir();
-    if std::fs::create_dir_all(&dir).is_ok() {
+    register_in(&global_dir(), s);
+}
+
+fn register_in(dir: &Path, s: &SessionFile) {
+    if std::fs::create_dir_all(dir).is_ok() {
         if let Ok(json) = serde_json::to_vec_pretty(s) {
             let _ = std::fs::write(dir.join(format!("{}.json", s.pid)), json);
         }
@@ -166,8 +169,12 @@ pub fn pid_alive(pid: u32) -> bool {
 
 /// Sessions that are still running (stale entries are cleaned up).
 fn live_sessions() -> Vec<SessionFile> {
-    reap_stale();
-    let Ok(rd) = std::fs::read_dir(global_dir()) else {
+    live_sessions_in(&global_dir())
+}
+
+fn live_sessions_in(dir: &Path) -> Vec<SessionFile> {
+    reap_stale_in(dir);
+    let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     rd.flatten()
@@ -180,7 +187,11 @@ fn live_sessions() -> Vec<SessionFile> {
 /// stop the app they pointed at their port, which another session may reuse.
 /// Returns what was cleaned.
 pub fn reap_stale() -> Vec<String> {
-    let Ok(rd) = std::fs::read_dir(global_dir()) else {
+    reap_stale_in(&global_dir())
+}
+
+fn reap_stale_in(dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut done = Vec::new();
@@ -262,11 +273,100 @@ pub fn gc(sims: bool) -> Result<()> {
 }
 
 /// First port from `start` that's neither listening nor claimed by a session.
-pub fn free_port(start: u16) -> Result<u16> {
-    let claimed: Vec<u16> = live_sessions().iter().map(|s| s.port).collect();
+fn free_port_in(dir: &Path, start: u16) -> Result<u16> {
+    let claimed: Vec<u16> = live_sessions_in(dir).iter().map(|s| s.port).collect();
     (start..start.saturating_add(100))
         .find(|p| !claimed.contains(p) && !crate::metro_events::port_in_use(*p))
         .ok_or_else(|| anyhow!("no free port in {start}–{}", start.saturating_add(99)))
+}
+
+/// A lock directory: one holder at a time, taken over when it's older than
+/// `stale` (its holder died). Released when dropped.
+struct DirLock(PathBuf);
+
+impl DirLock {
+    fn acquire(path: &Path, stale: Duration) -> DirLock {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let start = Instant::now();
+        while std::fs::create_dir(path).is_err() {
+            let old = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|a| a > stale);
+            if old || start.elapsed() > stale {
+                let _ = std::fs::remove_dir(path);
+            } else {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        DirLock(path.to_path_buf())
+    }
+}
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+/// What a session claims before its dashboard is up: its port, and its device
+/// once it has one. Registered at once (under a lock) so sessions starting
+/// together never get the same port or device.
+pub struct Claim {
+    dir: PathBuf,
+    entry: SessionFile,
+}
+
+impl Claim {
+    /// Claim Metro port `start`, or with `auto` the first free one from it.
+    pub fn port(root: &Path, start: u16, auto: bool) -> Result<Claim> {
+        Claim::port_in(&global_dir(), std::process::id(), root, start, auto)
+    }
+
+    fn port_in(dir: &Path, pid: u32, root: &Path, start: u16, auto: bool) -> Result<Claim> {
+        let _lock = DirLock::acquire(&dir.join("claims.lock"), Duration::from_secs(60));
+        let port = if auto { free_port_in(dir, start)? } else { start };
+        let entry = SessionFile {
+            pid,
+            root: root.display().to_string(),
+            port,
+            udid: None,
+            created_sim: false,
+            status: "starting".into(),
+            platform: None,
+            bundle: None,
+            socket: None,
+        };
+        register_in(dir, &entry);
+        Ok(Claim { dir: dir.to_path_buf(), entry })
+    }
+
+    pub fn port_number(&self) -> u16 {
+        self.entry.port
+    }
+
+    /// Claim device `udid` (one this session `created`, or an existing one),
+    /// unless another live session holds it.
+    pub fn device(&mut self, udid: &str, created: bool) -> Result<()> {
+        let _lock = DirLock::acquire(&self.dir.join("claims.lock"), Duration::from_secs(60));
+        if let Some(o) = live_sessions_in(&self.dir)
+            .into_iter()
+            .find(|s| s.pid != self.entry.pid && s.udid.as_deref() == Some(udid))
+        {
+            bail!(
+                "{udid} is in use by the signalbox session in {} (pid {}); pick another device, or use --new-sim",
+                o.root,
+                o.pid
+            );
+        }
+        self.entry.udid = Some(udid.to_string());
+        self.entry.created_sim = created;
+        register_in(&self.dir, &self.entry);
+        Ok(())
+    }
 }
 
 fn simctl_json(args: &[&str]) -> Result<Value> {
@@ -471,27 +571,11 @@ fn launch_within(udid: &str, bundle: &str, secs: u64) -> bool {
 fn template(ty: &str, rt: &str, desc: &str) -> Result<String> {
     let name = format!("{TEMPLATE_PREFIX} {desc}");
     // One builder at a time (parallel `up`s).
-    let lock = crate::rnconfig::rn_config_path().with_file_name("template.lock");
+    let _lock = DirLock::acquire(
+        &crate::rnconfig::rn_config_path().with_file_name("template.lock"),
+        Duration::from_secs(30 * 60),
+    );
     let start = Instant::now();
-    while std::fs::create_dir(&lock).is_err() {
-        let stale = std::fs::metadata(&lock)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|a| a > Duration::from_secs(30 * 60));
-        if stale || start.elapsed() > Duration::from_secs(30 * 60) {
-            let _ = std::fs::remove_dir(&lock);
-        } else {
-            std::thread::sleep(Duration::from_secs(1));
-        }
-    }
-    struct Unlock(PathBuf);
-    impl Drop for Unlock {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir(&self.0);
-        }
-    }
-    let _unlock = Unlock(lock);
     if let Some(udid) = sim_named(&name) {
         return Ok(udid);
     }
@@ -1070,11 +1154,64 @@ mod tests {
         assert!(!adb_listed(&a) && !adb_listed(&b));
     }
 
+    /// A registry dir of its own, and live processes to claim as.
+    fn claim_setup(name: &str) -> (PathBuf, Vec<std::process::Child>) {
+        let dir = std::env::temp_dir().join(format!("signalbox-claims-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let kids = (0..2).map(|_| Command::new("sleep").arg("30").spawn().unwrap()).collect();
+        (dir, kids)
+    }
+
+    #[test]
+    fn concurrent_claims_get_different_ports() {
+        let (dir, mut kids) = claim_setup("ports");
+        let start = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let ports: Vec<u16> = kids
+            .iter()
+            .map(|k| {
+                let (dir, pid) = (dir.clone(), k.id());
+                std::thread::spawn(move || {
+                    Claim::port_in(&dir, pid, Path::new("/wt"), start, true).unwrap().port_number()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        assert_ne!(ports[0], ports[1]);
+        for k in kids.iter_mut() {
+            let _ = k.kill();
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_held_device_cant_be_claimed() {
+        let (dir, mut kids) = claim_setup("device");
+        let mut a = Claim::port_in(&dir, kids[0].id(), Path::new("/a"), 9000, false).unwrap();
+        let mut b = Claim::port_in(&dir, kids[1].id(), Path::new("/b"), 9001, false).unwrap();
+        a.device("SIM-1", false).unwrap();
+        let err = b.device("SIM-1", false).unwrap_err().to_string();
+        assert!(err.contains("in use by the signalbox session in /a"), "{err}");
+        b.device("SIM-2", false).unwrap();
+        // Once its holder is gone, it's free again.
+        kids[0].kill().unwrap();
+        kids[0].wait().unwrap();
+        let mut c = Claim::port_in(&dir, kids[1].id(), Path::new("/b"), 9001, false).unwrap();
+        c.device("SIM-1", false).unwrap();
+        let _ = kids[1].kill();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn free_port_skips_listening_ports() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let taken = l.local_addr().unwrap().port();
-        assert_ne!(free_port(taken).unwrap(), taken);
+        let dir = std::env::temp_dir().join(format!("signalbox-free-{}", std::process::id()));
+        assert_ne!(free_port_in(&dir, taken).unwrap(), taken);
     }
 
     #[test]

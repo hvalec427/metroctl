@@ -6,6 +6,7 @@
 mod commands_rn;
 mod components;
 mod control;
+mod detach;
 mod devinfo;
 mod devlog;
 #[cfg(test)]
@@ -70,6 +71,11 @@ enum Command {
         /// building; JS still comes from this checkout's Metro. Falls back to building.
         #[arg(long)]
         prebuilt: bool,
+        /// Run in a window of the tmux session "signalbox" and return once the session is up,
+        /// printing its port and device (for agents, which have no terminal). A simulator it
+        /// creates is deleted when it stops, unless --sim-cleanup says otherwise.
+        #[arg(long)]
+        detach: bool,
     },
     /// Simulator helpers for tools that manage their own simulators (e.g. orc)
     Sim {
@@ -169,7 +175,13 @@ fn main() {
             sim_cleanup,
             install,
             prebuilt,
+            detach,
         }) => {
+            if detach {
+                let args: Vec<String> = std::env::args().skip_while(|a| a != "up").skip(1).collect();
+                commands_rn::detach(args);
+                return;
+            }
             let port = match port.as_deref() {
                 None => None,
                 Some("auto") => Some(None),
