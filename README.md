@@ -214,6 +214,14 @@ signalbox down                         # from another shell: stop it, delete its
 - `--port auto` picks the first free port from the configured one, skipping
   ports other sessions have claimed. The port reaches the build through
   `RCT_METRO_PORT`, so each app talks to its own Metro.
+- A session claims its port, and its device, the moment it picks them (under
+  a lock), so `up`s started together never share one: `--device` refuses a
+  device another running session is using.
+- `--detach` runs the dashboard in a tmux server of signalbox's own
+  (`tmux -L signalbox attach` to watch) and returns once the session is up,
+  printing its port and device: for agents, which have no terminal. A
+  simulator it creates is deleted when it stops. `down --detached-only` stops
+  only such a session.
 - `--new-sim [NAME]` creates a simulator (default `signalbox-<dir>`) using the
   newest iOS runtime and the newest plain iPhone. It's cloned from a settled
   template (`signalbox-template …`, built once per device type and iOS version),
@@ -265,6 +273,31 @@ server on top of it for coding agents:
 To see and use the app's screen (screenshots, element tree, taps, typing,
 deep links), use [boop](https://github.com/hvalec427/boop). Point it at
 the session's device with `boop --device-from .signalbox/session.json …`.
+
+### Claude Code plugin (`rn-sim`)
+
+The `rn-sim` plugin sets all of this up for Claude Code: each session in a
+React Native checkout gets its own simulator and Metro port, started when the
+agent needs the app and never shared with another session.
+
+```
+/plugin marketplace add https://github.com/hvalec427/signalbox.git#develop
+/plugin install rn-sim@signalbox
+```
+
+`/plugin uninstall rn-sim@signalbox` removes it; it adds nothing to your repos.
+For parallel tasks, start each in a worktree of its own: `claude --worktree <name>`.
+
+- When a session starts in a React Native checkout, it points boop at that
+  checkout's session, clones `node_modules`, `ios/Pods` and `.env*` from the
+  main checkout into a new worktree, and tells the agent whether the app is
+  running. Elsewhere it does nothing.
+- Questions are answered from the code. Before checking something in the app,
+  the `run-app` skill has the agent run `signalbox up --detach --port auto
+  --new-sim --prebuilt`, then use the MCP tools above and boop.
+- When the session ends, the app it started is stopped and its simulator
+  deleted. A dashboard you started yourself is left alone.
+- The main checkout needs `signalbox init` once.
 
 ## Contributing
 

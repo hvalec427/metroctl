@@ -1,0 +1,6 @@
+{
+  "name": "rn-sim",
+  "version": "0.1.0",
+  "description": "Each Claude Code session in a React Native checkout gets its own iOS simulator and Metro port (via signalbox), started when it's needed and never shared with another session.",
+  "author": { "name": "Žiga Hvalec" }
+}

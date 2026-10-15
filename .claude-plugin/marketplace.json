@@ -1,0 +1,14 @@
+{
+  "name": "signalbox",
+  "owner": {
+    "name": "Žiga Hvalec"
+  },
+  "description": "Claude Code plugins for signalbox: React Native apps on simulators of their own.",
+  "plugins": [
+    {
+      "name": "rn-sim",
+      "source": "./claude-plugin",
+      "description": "Each Claude Code session in a React Native checkout gets its own iOS simulator and Metro port, started when it's needed and never shared with another session."
+    }
+  ]
+}
