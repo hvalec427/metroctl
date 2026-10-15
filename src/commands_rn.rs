@@ -146,13 +146,16 @@ pub fn detach(args: Vec<String>) {
 }
 
 /// `signalbox down` — stop the session running in this checkout.
-pub fn down(keep_sim: bool) {
+pub fn down(keep_sim: bool, detached_only: bool) {
     let root = load_rn_config()
         .ok()
         .flatten()
         .and_then(|c| current_project(&c))
         .map(|p| std::path::PathBuf::from(p.root));
     let root = root.or_else(|| std::env::current_dir().ok()).unwrap();
+    if detached_only && !session::read_session(&root).is_some_and(|s| s.detached) {
+        return;
+    }
     if let Err(e) = session::down(&root, keep_sim) {
         eprintln!("{e:#}");
         std::process::exit(1);

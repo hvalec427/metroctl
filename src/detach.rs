@@ -88,6 +88,7 @@ fn open(name: &str, root: &Path, cmd: &str, window: bool) -> Result<std::process
         t.args(["new-session", "-d", "-s", TMUX]);
     }
     t.args(["-P", "-F", "#{pane_id}", "-n", name]);
+    t.args(["-e", "SIGNALBOX_DETACHED=1"]);
     for var in ["PATH", "SIGNALBOX_HOME"] {
         if let Ok(v) = std::env::var(var) {
             t.arg("-e").arg(format!("{var}={v}"));

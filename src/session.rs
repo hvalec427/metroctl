@@ -68,6 +68,14 @@ pub struct SessionFile {
     /// Control socket (JSON lines), see `control.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket: Option<String>,
+    /// Started with `up --detach` (by an agent), so its tools may stop it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
+}
+
+/// Whether this process runs under `up --detach`.
+pub fn detached() -> bool {
+    std::env::var_os("SIGNALBOX_DETACHED").is_some()
 }
 
 pub fn session_dir(root: &Path) -> PathBuf {
@@ -339,6 +347,7 @@ impl Claim {
             platform: None,
             bundle: None,
             socket: None,
+            detached: detached(),
         };
         register_in(dir, &entry);
         Ok(Claim { dir: dir.to_path_buf(), entry })

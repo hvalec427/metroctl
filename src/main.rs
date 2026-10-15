@@ -93,6 +93,10 @@ enum Command {
         /// Keep the simulator
         #[arg(long = "keep-sim")]
         keep_sim: bool,
+        /// Only stop a session started with `up --detach` (an agent's), and don't fail when
+        /// there's nothing to stop: for hooks that clean up after an agent
+        #[arg(long = "detached-only")]
+        detached_only: bool,
     },
     /// Stream React Native JS console + network from Metro (CDP)
     Logs {
@@ -207,7 +211,7 @@ fn main() {
                 prebuilt,
             })
         }
-        Some(Command::Down { keep_sim }) => commands_rn::down(keep_sim),
+        Some(Command::Down { keep_sim, detached_only }) => commands_rn::down(keep_sim, detached_only),
         Some(Command::Sim {
             action:
                 SimAction::New {

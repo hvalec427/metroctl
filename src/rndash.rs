@@ -592,6 +592,7 @@ impl DashApp {
                 created_sim: self.pinned.as_ref().is_some_and(|p| p.created),
                 status: self.status.clone(),
                 bundle: self.project.ios_bundle_id().map(String::from),
+                detached: session::detached(),
                 platform: self.pinned.as_ref().map(|p| {
                     if p.android {
                         "android"
