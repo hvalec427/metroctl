@@ -44,6 +44,13 @@ pub struct Row {
     pub text: String,
 }
 
+/// A prop edit: the element, the prop's path, and the value it had before.
+struct Edit {
+    id: i64,
+    path: Vec<Value>,
+    was: Option<Value>,
+}
+
 /// What to ask the backend about the selected component.
 pub struct InspectRequest {
     pub id: i64,
@@ -73,6 +80,8 @@ pub struct Tree {
     pub unavailable: Option<String>,
     /// The tree couldn't be decoded (an unsupported protocol change).
     pub error: Option<String>,
+    /// Prop edits, kept through re-renders by the app.
+    edits: Vec<Edit>,
 }
 
 impl Tree {
@@ -377,54 +386,130 @@ impl Tree {
         }
     }
 
+    /// The selected element and its renderer, to edit.
+    pub fn edit_target(&self) -> Option<(i64, i64)> {
+        let id = self.selected?;
+        Some((id, self.renderer(id)))
+    }
+
+    /// What the edit prompt starts with for the prop at `path`: the path and,
+    /// when it's plain data, its current value as JSON.
+    pub fn edit_prefill(&self, path: &[Value]) -> String {
+        let value = self
+            .prop(path)
+            .filter(|v| plain(v))
+            .map(Value::to_string)
+            .unwrap_or_default();
+        format!("{} = {value}", path_text(path))
+    }
+
+    /// Remember a prop edit (its line gets marked), and re-inspect soon.
+    /// False when it puts back the value the prop had before the first edit,
+    /// which unmarks it.
+    pub fn edited(&mut self, id: i64, path: &[Value], value: &Value) -> bool {
+        self.last_request = None;
+        let pos = self.edits.iter().position(|e| e.id == id && e.path == path);
+        let was = match pos {
+            Some(i) => self.edits[i].was.clone(),
+            None => self.prop(path).cloned(),
+        };
+        if let Some(i) = pos {
+            self.edits.remove(i);
+        }
+        if was.as_ref() == Some(value) {
+            return false;
+        }
+        self.edits.push(Edit {
+            id,
+            path: path.to_vec(),
+            was,
+        });
+        true
+    }
+
+    /// The selected component's prop at `path`, as last inspected.
+    fn prop(&self, path: &[Value]) -> Option<&Value> {
+        let props = self
+            .inspected
+            .as_ref()
+            .filter(|(id, _)| Some(*id) == self.selected)
+            .and_then(|(_, v)| section_data(&v["props"]))?;
+        path.iter().try_fold(props, |v, k| match k {
+            Value::Number(n) => v.get(n.as_u64()? as usize),
+            Value::String(s) => v.get(s),
+            _ => None,
+        })
+    }
+
     /// Where the selected component is defined in the project ("file:line"),
     /// once inspected.
     pub fn source(&self) -> Option<&str> {
+        self.inspected_str("signalboxSource")
+    }
+
+    /// Where the selected component is used: the JSX line in the project
+    /// that created it ("file:line").
+    pub fn usage(&self) -> Option<&str> {
+        self.inspected_str("signalboxUsage")
+    }
+
+    fn inspected_str(&self, field: &str) -> Option<&str> {
         let (id, v) = self.inspected.as_ref()?;
-        (Some(*id) == self.selected).then(|| v["signalboxSource"].as_str())?
+        (Some(*id) == self.selected).then(|| v[field].as_str())?
     }
 
     /// The detail pane for the selected component.
     pub fn detail_lines(&self) -> Vec<String> {
+        self.detail().text
+    }
+
+    /// The prop shown on line `line` of the detail pane, if it shows one.
+    pub fn prop_at(&self, line: usize) -> Option<Vec<Value>> {
+        self.detail().props.into_iter().nth(line).flatten()
+    }
+
+    fn detail(&self) -> Lines {
+        let mut out = Lines::default();
         let Some(id) = self.selected else {
-            return Vec::new();
+            return out;
         };
         let name = self.name(id).unwrap_or("?").to_string();
-        let mut out = vec![format!("<{name}>  #{id}")];
+        out.push(format!("<{name}>  #{id}"), None);
         if let Some(e) = &self.inspect_error {
-            out.push(format!("  {e}"));
+            out.push(format!("  {e}"), None);
             return out;
         }
         let Some((_, v)) = self.inspected.as_ref().filter(|(i, _)| *i == id) else {
-            out.push("  inspecting…".into());
+            out.push("  inspecting…".into(), None);
             return out;
         };
         if let Some(k) = v["key"].as_str() {
-            out.push(format!("  key {k:?}"));
+            out.push(format!("  key {k:?}"), None);
         }
         for (title, field) in [("Props", "props"), ("State", "state")] {
             if let Some(data) = section_data(&v[field]) {
-                out.push(format!("── {title} ──"));
+                let at = (field == "props").then_some(&[][..]);
+                out.push(format!("── {title} ──"), None);
                 let before = out.len();
-                fmt_entries(data, 1, &mut out);
+                fmt_entries(data, 1, at, &mut out);
                 if out.len() == before {
-                    out.push("  (none)".into());
+                    out.push("  (none)".into(), None);
                 }
             }
         }
         if let Some(hooks) = section_data(&v["hooks"]).and_then(|h| h.as_array()) {
             if !hooks.is_empty() {
-                out.push("── Hooks ──".into());
+                out.push("── Hooks ──".into(), None);
                 fmt_hooks(hooks, 1, &mut out);
             }
         }
         if let Some(data) = section_data(&v["context"]) {
-            out.push("── Context ──".into());
-            fmt_value(None, data, 1, &mut out);
+            out.push("── Context ──".into(), None);
+            fmt_value(None, data, 1, None, &mut out);
         }
         for (title, field) in [("Errors", "errors"), ("Warnings", "warnings")] {
             if let Some(list) = v[field].as_array().filter(|l| !l.is_empty()) {
-                out.push(format!("── {title} ──"));
+                out.push(format!("── {title} ──"), None);
                 for e in list {
                     let n = e[1].as_i64().unwrap_or(1);
                     let times = if n > 1 {
@@ -432,23 +517,127 @@ impl Tree {
                     } else {
                         String::new()
                     };
-                    out.push(format!("  {}{times}", e[0].as_str().unwrap_or("")));
+                    out.push(format!("  {}{times}", e[0].as_str().unwrap_or("")), None);
                 }
             }
         }
         if let Some(owners) = v["owners"].as_array().filter(|o| !o.is_empty()) {
-            out.push("── Rendered by ──".into());
+            out.push("── Rendered by ──".into(), None);
             for o in owners {
-                out.push(format!("  {}", o["displayName"].as_str().unwrap_or("?")));
+                out.push(
+                    format!("  {}", o["displayName"].as_str().unwrap_or("?")),
+                    None,
+                );
             }
         }
-        // Only a location in the project: a bundle address can't be opened.
-        if let Some(s) = self.source() {
-            out.push("── Source ──".into());
-            out.push(format!("  at {name} ({s})"));
+        // Only locations in the project: a bundle address can't be opened.
+        if self.usage().is_some() || self.source().is_some() {
+            out.push("── Source ──".into(), None);
         }
+        if let Some(s) = self.usage() {
+            let owner = v["owners"][0]["displayName"]
+                .as_str()
+                .unwrap_or("its parent");
+            out.push(format!("  used in {owner} ({s})"), None);
+        }
+        if let Some(s) = self.source() {
+            out.push(format!("  defined in {name} ({s})"), None);
+        }
+        self.mark_edits(id, &mut out);
         out
     }
+
+    /// Mark the lines of edited props, with the value each had before.
+    fn mark_edits(&self, id: i64, out: &mut Lines) {
+        for e in self.edits.iter().filter(|e| e.id == id) {
+            let Some(i) = out.props.iter().position(|p| p.as_ref() == Some(&e.path)) else {
+                continue;
+            };
+            let was = match &e.was {
+                Some(v) => placeholder(v).unwrap_or_else(|| short(v)),
+                None => "unset".into(),
+            };
+            let line = &mut out.text[i];
+            let indent = line.len() - line.trim_start().len();
+            if indent >= 2 {
+                line.replace_range(indent - 2..indent, "✎ ");
+            }
+            line.push_str(&format!("  (was {was})"));
+        }
+    }
+}
+
+/// The detail pane's lines, each with the prop it shows (Props lines only),
+/// so the line under the cursor can be edited.
+#[derive(Default)]
+struct Lines {
+    text: Vec<String>,
+    props: Vec<Option<Vec<Value>>>,
+}
+
+impl Lines {
+    fn push(&mut self, line: String, prop: Option<Vec<Value>>) {
+        self.text.push(line);
+        self.props.push(prop);
+    }
+
+    fn len(&self) -> usize {
+        self.text.len()
+    }
+}
+
+/// A value on one line, cut short.
+fn short(v: &Value) -> String {
+    let s = v.to_string();
+    match s.char_indices().nth(40) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s,
+    }
+}
+
+/// A prop path as typed: `style.0.color`.
+fn path_text(path: &[Value]) -> String {
+    path.iter()
+        .map(|p| match p {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Data an edit can start from: no functions, elements or other previews.
+fn plain(v: &Value) -> bool {
+    match v {
+        Value::Object(o) => {
+            !o.contains_key("inspectable") && placeholder(v).is_none() && o.values().all(plain)
+        }
+        Value::Array(a) => a.iter().all(plain),
+        _ => true,
+    }
+}
+
+/// An edit typed as `path = value`: a dotted prop path (`style.color`,
+/// `items.0`; a leading `props.` is optional) and a JSON value, or else the
+/// text as a string.
+pub fn parse_edit(input: &str) -> Option<(Vec<Value>, Value)> {
+    let (path, value) = input.split_once('=')?;
+    let path = path.trim();
+    let path = path.strip_prefix("props.").unwrap_or(path);
+    let segments: Vec<Value> = path
+        .split('.')
+        .map(str::trim)
+        .map(|s| match s.parse::<u64>() {
+            Ok(n) => Value::from(n),
+            Err(_) => Value::from(s),
+        })
+        .collect();
+    if segments.iter().any(|s| s.as_str() == Some("")) {
+        return None;
+    }
+    let value = value.trim();
+    let value = serde_json::from_str(value).unwrap_or_else(|_| Value::from(value));
+    Some((segments, value))
 }
 
 /// A cleaned section (`{data, cleaned, unserializable}`), or the raw value
@@ -563,26 +752,37 @@ fn placeholder(v: &Value) -> Option<String> {
     }
 }
 
-fn fmt_entries(data: &Value, depth: usize, out: &mut Vec<String>) {
+/// `at`: where `data` is in the props, for lines that show props.
+fn fmt_entries(data: &Value, depth: usize, at: Option<&[Value]>, out: &mut Lines) {
     match data.as_object() {
         Some(o) => {
             for (k, v) in o {
-                fmt_value(Some(k), v, depth, out);
+                fmt_value(Some(k), v, depth, child(at, k.as_str().into()), out);
             }
         }
-        None => fmt_value(None, data, depth, out),
+        None => fmt_value(None, data, depth, at.map(<[Value]>::to_vec), out),
     }
 }
 
+fn child(at: Option<&[Value]>, key: Value) -> Option<Vec<Value>> {
+    at.map(|p| p.iter().cloned().chain([key]).collect())
+}
+
 /// One value as JS-ish lines: scalars inline, objects and arrays nested.
-fn fmt_value(label: Option<&str>, v: &Value, depth: usize, out: &mut Vec<String>) {
+fn fmt_value(
+    label: Option<&str>,
+    v: &Value,
+    depth: usize,
+    at: Option<Vec<Value>>,
+    out: &mut Lines,
+) {
     let pad = "  ".repeat(depth);
     let lead = label.map(|l| format!("{l}: ")).unwrap_or_default();
     if out.len() > 2000 {
         return;
     }
     if let Some(p) = placeholder(v) {
-        out.push(format!("{pad}{lead}{p}"));
+        out.push(format!("{pad}{lead}{p}"), at);
         return;
     }
     match v {
@@ -598,39 +798,40 @@ fn fmt_value(label: Option<&str>, v: &Value, depth: usize, out: &mut Vec<String>
                 .map(|n| format!("{n} "))
                 .unwrap_or_default();
             if fields.is_empty() {
-                out.push(format!("{pad}{lead}{tag}{{}}"));
+                out.push(format!("{pad}{lead}{tag}{{}}"), at);
                 return;
             }
-            out.push(format!("{pad}{lead}{tag}{{"));
+            out.push(format!("{pad}{lead}{tag}{{"), at.clone());
             for (k, v) in fields {
-                fmt_value(Some(k), v, depth + 1, out);
+                let here = child(at.as_deref(), k.as_str().into());
+                fmt_value(Some(k), v, depth + 1, here, out);
             }
-            out.push(format!("{pad}}}"));
+            out.push(format!("{pad}}}"), None);
         }
-        Value::Array(a) if a.is_empty() => out.push(format!("{pad}{lead}[]")),
+        Value::Array(a) if a.is_empty() => out.push(format!("{pad}{lead}[]"), at),
         Value::Array(a) => {
-            out.push(format!("{pad}{lead}["));
-            for item in a {
-                fmt_value(None, item, depth + 1, out);
+            out.push(format!("{pad}{lead}["), at.clone());
+            for (i, item) in a.iter().enumerate() {
+                fmt_value(None, item, depth + 1, child(at.as_deref(), i.into()), out);
             }
-            out.push(format!("{pad}]"));
+            out.push(format!("{pad}]"), None);
         }
-        Value::String(s) => out.push(format!("{pad}{lead}{s:?}")),
-        other => out.push(format!("{pad}{lead}{other}")),
+        Value::String(s) => out.push(format!("{pad}{lead}{s:?}"), at),
+        other => out.push(format!("{pad}{lead}{other}"), at),
     }
 }
 
 /// Hooks in call order; custom hooks show their built-in hooks nested.
-fn fmt_hooks(hooks: &[Value], depth: usize, out: &mut Vec<String>) {
+fn fmt_hooks(hooks: &[Value], depth: usize, out: &mut Lines) {
     for h in hooks {
         let name = h["name"].as_str().unwrap_or("Hook");
         let subs = h["subHooks"].as_array().filter(|s| !s.is_empty());
         match subs {
             Some(subs) => {
-                out.push(format!("{}{name}:", "  ".repeat(depth)));
+                out.push(format!("{}{name}:", "  ".repeat(depth)), None);
                 fmt_hooks(subs, depth + 1, out);
             }
-            None => fmt_value(Some(name), &h["value"], depth, out),
+            None => fmt_value(Some(name), &h["value"], depth, None, out),
         }
     }
 }
@@ -653,6 +854,101 @@ mod tests {
         out.extend(table);
         out.extend_from_slice(ops);
         out
+    }
+
+    #[test]
+    fn edits_parse_as_a_path_and_a_json_value_or_text() {
+        assert_eq!(
+            parse_edit(r#"children = "Hi""#),
+            Some((vec![json!("children")], json!("Hi")))
+        );
+        assert_eq!(
+            parse_edit("props.style.0.color=red"),
+            Some((vec![json!("style"), json!(0), json!("color")], json!("red")))
+        );
+        assert_eq!(
+            parse_edit(r#"style = {"opacity": 0.5}"#),
+            Some((vec![json!("style")], json!({"opacity": 0.5})))
+        );
+        assert_eq!(
+            parse_edit("disabled = true"),
+            Some((vec![json!("disabled")], json!(true)))
+        );
+        assert_eq!(
+            parse_edit("title = a = b"),
+            Some((vec![json!("title")], json!("a = b")))
+        );
+        assert_eq!(parse_edit("no equals sign"), None);
+        assert_eq!(parse_edit(" = 1"), None);
+        assert_eq!(parse_edit("a..b = 1"), None);
+    }
+
+    #[test]
+    fn each_props_line_knows_its_prop() {
+        let mut t = tree();
+        t.selected = Some(3);
+        t.on_inspected(&json!({"id": 3, "type": "full-data", "value": {
+            "props": {"data": {
+                "onPress": {"type": "function", "name": "onPress", "inspectable": false,
+                    "preview_short": "onPress() {}", "preview_long": "onPress() {}"},
+                "style": [{"color": "red"}, {"margin": 4}],
+                "title": "Hi",
+            }, "cleaned": [], "unserializable": []},
+            "hooks": {"data": [{"name": "State", "value": 1, "subHooks": []}], "cleaned": [], "unserializable": []},
+        }}));
+        let lines = t.detail_lines();
+        let at = |text: &str| {
+            let i = lines.iter().position(|l| l.trim() == text).unwrap();
+            t.prop_at(i).map(|p| path_text(&p))
+        };
+        assert_eq!(at("onPress: onPress() {}").as_deref(), Some("onPress"));
+        assert_eq!(at("style: [").as_deref(), Some("style"));
+        assert_eq!(at("color: \"red\"").as_deref(), Some("style.0.color"));
+        assert_eq!(at("margin: 4").as_deref(), Some("style.1.margin"));
+        assert_eq!(at("title: \"Hi\"").as_deref(), Some("title"));
+        assert_eq!(at("]"), None);
+        assert_eq!(at("── Props ──"), None);
+        assert_eq!(at("State: 1"), None);
+        // Prefilled with the value when it's data, else left to type.
+        assert_eq!(
+            t.edit_prefill(&[json!("style"), json!(0)]),
+            r#"style.0 = {"color":"red"}"#
+        );
+        assert_eq!(
+            t.edit_prefill(&[json!("style")]),
+            r#"style = [{"color":"red"},{"margin":4}]"#
+        );
+        assert_eq!(t.edit_prefill(&[json!("onPress")]), "onPress = ");
+    }
+
+    #[test]
+    fn edited_props_are_marked_with_what_they_were() {
+        let mut t = tree();
+        t.selected = Some(3);
+        t.on_inspected(&json!({"id": 3, "type": "full-data", "value": {
+            "props": {"data": {"children": "Hello", "style": [{"opacity": 1}]}, "cleaned": [], "unserializable": []}}}));
+        assert_eq!(
+            t.edit_prefill(&[json!("children")]),
+            r#"children = "Hello""#
+        );
+        assert!(t.edited(3, &[json!("children")], &json!("Bye")));
+        assert!(t.edited(3, &[json!("style"), json!(0), json!("opacity")], &json!(0)));
+        // The app answers with the new values; the first value is kept.
+        t.on_inspected(&json!({"id": 3, "type": "full-data", "value": {
+            "props": {"data": {"children": "Bye", "style": [{"opacity": 0}]}, "cleaned": [], "unserializable": []}}}));
+        assert!(t.edited(3, &[json!("children")], &json!("Ciao")));
+        t.on_inspected(&json!({"id": 3, "type": "full-data", "value": {
+            "props": {"data": {"children": "Ciao", "style": [{"opacity": 0}]}, "cleaned": [], "unserializable": []}}}));
+        let lines = t.detail_lines();
+        assert!(lines.contains(&r#"✎ children: "Ciao"  (was "Hello")"#.to_string()));
+        assert!(lines.contains(&"    ✎ opacity: 0  (was 1)".to_string()));
+        // Putting the old value back unmarks it.
+        assert!(!t.edited(3, &[json!("children")], &json!("Hello")));
+        t.on_inspected(&json!({"id": 3, "type": "full-data", "value": {
+            "props": {"data": {"children": "Hello", "style": [{"opacity": 0}]}, "cleaned": [], "unserializable": []}}}));
+        assert!(t
+            .detail_lines()
+            .contains(&r#"  children: "Hello""#.to_string()));
     }
 
     /// Root 1 › App 2 › (Header 3, List 4 › Item key="a" 5, Item key="b" 6)
@@ -837,6 +1133,7 @@ mod tests {
             "owners": [{"displayName": "List", "id": 4}, {"displayName": "App", "id": 2}],
             "source": {"sourceURL": "http://localhost:8081/index.bundle", "line": 120, "column": 4},
             "signalboxSource": "/app/src/Item.tsx:12",
+            "signalboxUsage": "/app/src/List.tsx:30",
         }}));
         assert_eq!(
             t.detail_lines(),
@@ -867,7 +1164,8 @@ mod tests {
                 "  List",
                 "  App",
                 "── Source ──",
-                "  at Item (/app/src/Item.tsx:12)",
+                "  used in List (/app/src/List.tsx:30)",
+                "  defined in Item (/app/src/Item.tsx:12)",
             ]
         );
     }

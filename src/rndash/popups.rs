@@ -10,7 +10,7 @@ const HELP_LEFT: &[KeySection] = &[
     (
         "Global",
         &[
-            ("⇥ / ⇧⇥", "next / previous pane"),
+            ("⇥ / ⇧⇥", "next / previous pane (logs: list, detail)"),
             ("^←→↑↓", "resize panes"),
             ("R", "reload the app"),
             ("D", "open the dev menu"),
@@ -61,8 +61,7 @@ const HELP_RIGHT: &[KeySection] = &[
             ("1-9", "switch device"),
             ("/  n N", "search, next / previous match"),
             ("f", "filter"),
-            ("⏎", "open the entry"),
-            ("z", "open maximized / toggle split"),
+            ("⏎", "go to the detail pane"),
             ("V", "visual select, then y"),
             ("y", "copy"),
             ("c", "clear"),
@@ -70,10 +69,11 @@ const HELP_RIGHT: &[KeySection] = &[
         ],
     ),
     (
-        "Open entry",
+        "Detail pane",
         &[
-            ("⏎ / Esc", "close"),
-            ("J K", "scroll the entry (split view)"),
+            ("⏎", "open file:line in nvim, else copy the line"),
+            ("Esc", "back to the list"),
+            ("J K", "scroll it from the list"),
             ("{  }", "previous / next section"),
             ("o", "open file:line in nvim"),
             ("F", "show framework stack frames"),
@@ -93,8 +93,8 @@ const HELP_RIGHT: &[KeySection] = &[
             ("s", "select by tapping it in the app"),
             ("h l  ← →", "fold / unfold, or out / in"),
             ("u", "parent"),
-            ("⏎", "props, state, hooks, source"),
-            ("o", "open its source in nvim"),
+            ("o / O", "open where it's used / defined"),
+            ("⏎", "detail pane: edit the prop on the line"),
         ],
     ),
     (

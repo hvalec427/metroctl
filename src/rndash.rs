@@ -98,6 +98,22 @@ struct SetupRun {
     prebuilt: Option<PathBuf>,
 }
 
+/// Once a signal asks us to stop, the main loop quits within a frame, unless
+/// it's stuck: when the terminal closes, crossterm keeps reading its end of
+/// file in a loop and never returns (it once spun for days). Then exit; the
+/// processes go with the terminal, and `gc` or the next `up` finds the session.
+fn exit_if_stuck(term: Arc<AtomicBool>, looping: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        while !term.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        std::thread::sleep(Duration::from_secs(3));
+        if looping.load(Ordering::Relaxed) {
+            std::process::exit(129);
+        }
+    });
+}
+
 pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
     let mut app = DashApp::new(project, setup.pinned.clone());
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
@@ -117,7 +133,10 @@ pub fn run(project: ProjectConfig, setup: Setup) -> Result<()> {
     let mut terminal = ratatui::init();
     // Pastes arrive as one event (for the link form) instead of keystrokes.
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
+    let looping = Arc::new(AtomicBool::new(true));
+    exit_if_stuck(app.term.clone(), looping.clone());
     let res = app.main_loop(&mut terminal);
+    looping.store(false, Ordering::Relaxed);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     let root = app.root();
@@ -1087,8 +1106,12 @@ impl DashApp {
         self.set_flash("Metro isn't running — press m to start it");
     }
 
+    /// Tab/Shift-Tab: Processes → Devices → the logs list → its detail pane.
     fn cycle_focus(&mut self, back: bool) {
         self.input_mode = false;
+        if self.focus == Pane::Logs && self.rnview.next_pane(back) {
+            return;
+        }
         self.focus = match (self.focus, back) {
             (Pane::Processes, false) => Pane::Devices,
             (Pane::Devices, false) => Pane::Logs,
@@ -1097,6 +1120,9 @@ impl DashApp {
             (Pane::Devices, true) => Pane::Processes,
             (Pane::Logs, true) => Pane::Devices,
         };
+        if self.focus == Pane::Logs {
+            self.rnview.enter_pane(back);
+        }
     }
 
     fn main_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {

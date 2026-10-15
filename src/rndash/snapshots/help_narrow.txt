@@ -1,6 +1,6 @@
 ┌ Proces┌ Keys ────────────────────────────────────────────────────────┐───────┐
 │       │ Global                                                       │       │
-│Press  │   ⇥ / ⇧⇥      next / previous pane                           │       │
+│Press  │   ⇥ / ⇧⇥      next / previous pane (logs: list, detail)      │       │
 │       │   ^←→↑↓       resize panes                                   │       │
 │       │   R           reload the app                                 │ UDID-1│
 │       │   D           open the dev menu                              │       │

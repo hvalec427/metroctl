@@ -4,11 +4,13 @@
 // `getInspectorDataForViewAtPoint` and hands the result to React DevTools'
 // agent. Things that break that on Fabric, fixed here:
 //
-// 0. A stale agent: AppContainer keeps the agent that existed when it first
-//    rendered, and only follows newer ones if there was none then. After a
-//    reload the backend connects before AppContainer renders, so a later
-//    connection (signalbox reattaching) leaves the overlay on a dead agent and
-//    `s` does nothing. AppContainer's state is set to the current agent.
+// 0. No agent, or a stale one: AppContainer keeps the agent that existed when
+//    it first rendered, and only follows newer ones if there was none then.
+//    After a reload the backend may connect before AppContainer renders, so a
+//    later connection (signalbox reattaching) leaves the overlay on a dead
+//    agent; or between its render and its subscribing, so it never gets one
+//    and there's no overlay. Either way `s` does nothing. AppContainer's state
+//    is set to the current agent.
 //
 // 1. Pager pages (react-native-pager-view, so tab views): every page shares the
 //    same frame in the shadow tree, so the native hit test lands in the topmost
@@ -21,10 +23,15 @@
 // 3. Text highlights: React Native outlines an element through its public
 //    instance and skips it when there is none, so selected text got no
 //    outline. Highlighted host instances get theirs created first.
+// 4. An overlay that stopped listening: it drops its agent's listeners when
+//    that agent shuts down, and AppContainer may still hand it the same agent,
+//    so it never listens again. Before each `s`, signalbox runs
+//    `__signalboxPickCheck`, which remounts the overlay then (and does 0).
+//    What it found goes to `hook.__signalboxPickLog`.
 //
 // Idempotent; run again after a reload and after each connection.
 (() => {
-  const VERSION = 5;
+  const VERSION = 7;
   const hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
   if (hook == null || hook.renderers == null) return 'unsupported';
 
@@ -94,10 +101,14 @@
     return null;
   };
 
-  // 0. Point AppContainer (and so its overlay) at the current agent.
+  // 0. Point AppContainer (and so its overlay) at the current agent. 'same'
+  // when the overlay has it, 'set' when it will on AppContainer's next render.
   const followCurrentAgent = () => {
     const current = hook.reactDevtoolsAgent;
-    if (current == null || !hook.getFiberRoots) return;
+    if (current == null || !hook.getFiberRoots) return false;
+    // AppContainer's state setter, if it still waits for an agent.
+    const waiting = new Set((hook.listeners && hook.listeners['react-devtools']) || []);
+    let dispatched = false;
     for (const root of hook.getFiberRoots(1)) {
       const queue = [[root.current, 0]];
       while (queue.length) {
@@ -105,22 +116,93 @@
         if (f == null || depth > 40) continue;
         if (f.type && f.type.name === 'ReactDevToolsOverlay') {
           const stale = f.memoizedProps.reactDevToolsAgent;
-          if (stale === current) return;
-          // AppContainer: the component that rendered the overlay; its
-          // `useState` hook holding the stale agent.
-          for (let owner = f.return; owner != null; owner = owner.return) {
-            for (let hookState = owner.memoizedState; hookState != null; hookState = hookState.next) {
-              if (hookState.memoizedState === stale && hookState.queue && typeof hookState.queue.dispatch === 'function') {
-                hookState.queue.dispatch(current);
-                return;
-              }
+          if (stale === current) return 'same';
+          const set = holder(f, stale);
+          if (set == null) return false;
+          set(current);
+          return 'set';
+        }
+        // No overlay yet: AppContainer rendered before there was an agent and
+        // subscribed after the backend announced it, so it missed it.
+        if ((f.tag === 0 || f.tag === 11 || f.tag === 15) && f.memoizedState != null && !dispatched) {
+          for (let hookState = f.memoizedState; hookState != null; hookState = hookState.next) {
+            const q = hookState.queue;
+            if (q && waiting.has(q.dispatch) && hookState.memoizedState !== current) {
+              q.dispatch(current);
+              dispatched = true;
             }
           }
-          return;
         }
         queue.push([f.child, depth + 1], [f.sibling, depth]);
       }
     }
+    return dispatched && 'set';
+  };
+  // AppContainer: the component that rendered the overlay `f`; the setter of
+  // its `useState` hook holding `agent`.
+  const holder = (f, agent) => {
+    for (let owner = f.return; owner != null; owner = owner.return) {
+      for (let hookState = owner.memoizedState; hookState != null; hookState = hookState.next) {
+        if (hookState.memoizedState === agent && hookState.queue && typeof hookState.queue.dispatch === 'function') {
+          return hookState.queue.dispatch;
+        }
+      }
+    }
+    return null;
+  };
+  const findOverlay = () => {
+    for (const root of hook.getFiberRoots(1)) {
+      const queue = [[root.current, 0]];
+      while (queue.length) {
+        const [f, depth] = queue.shift();
+        if (f == null || depth > 40) continue;
+        if (f.type && f.type.name === 'ReactDevToolsOverlay') return f;
+        queue.push([f.child, depth + 1], [f.sibling, depth]);
+      }
+    }
+    return null;
+  };
+
+  // 4. Right before `s`: make sure the overlay will hear it.
+  hook.__signalboxPickCheck = () => {
+    const log = (hook.__signalboxPickLog = hook.__signalboxPickLog || []);
+    const note = (m) => {
+      log.push(new Date().toISOString().slice(11, 19) + ' ' + m);
+      if (log.length > 50) log.shift();
+      return m;
+    };
+    const agent = hook.reactDevtoolsAgent;
+    if (agent == null) return note('no agent');
+    // Tell the overlay to start once it's back (the agent's own word to start
+    // comes right after this, while it's still away).
+    const startSoon = () => setTimeout(() => agent.emit('startInspectingNative'), 150);
+    let followed = false;
+    try {
+      followed = followCurrentAgent();
+    } catch (e) {}
+    if (followed === 'set') {
+      startSoon();
+      return note('pointed the overlay at the current agent');
+    }
+    const listening = agent.listenersMap && agent.listenersMap.get('startInspectingNative');
+    if (!agent.listenersMap || (listening && listening.length > 0)) return note('ok');
+    const f = findOverlay();
+    const set = f && holder(f, agent);
+    if (set == null) return note('no overlay');
+    set(null);
+    setTimeout(() => {
+      set(agent);
+      startSoon();
+    }, 50);
+    return note('remounted the overlay');
+  };
+  // Right after a reload AppContainer may not have subscribed yet: retry.
+  const follow = (tries) => {
+    let done = false;
+    try {
+      done = followCurrentAgent();
+    } catch (e) {}
+    if (!done && tries > 0) setTimeout(() => follow(tries - 1), 1000);
   };
 
   // 3. Public instances for the host instances React DevTools highlights.
@@ -184,9 +266,7 @@
     config.getInspectorDataForViewAtPoint = wrapped;
   };
   hook.renderers.forEach(patch);
-  try {
-    followCurrentAgent();
-  } catch (e) {}
+  follow(5);
   withPublicInstances(hook.rendererInterfaces);
   if (!hook.__signalboxTapFix) {
     hook.__signalboxTapFix = true;

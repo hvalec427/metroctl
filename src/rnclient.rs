@@ -29,6 +29,21 @@ const DEVTOOLS_INIT_JS: &str = "typeof __FUSEBOX_REACT_DEVTOOLS_DISPATCHER__ ===
 /// file. Idempotent; re-run after a reload.
 const DEVTOOLS_TAP_FIX_JS: &str = include_str!("devtools_tap_fix.js");
 
+/// Keeps prop edits through re-renders; see the file.
+const DEVTOOLS_PINS_JS: &str = include_str!("devtools_pins.js");
+
+/// The tap fix and the pins, as one script. `SIGNALBOX_PIN` picks how pins
+/// are kept: `a` re-applies them after each render (the default), `b` wraps
+/// the component's type, `off` leaves edits as React DevTools makes them.
+fn devtools_scripts() -> String {
+    let mode = match std::env::var("SIGNALBOX_PIN").as_deref() {
+        Ok("b") => "b",
+        Ok("off") => "off",
+        _ => "a",
+    };
+    format!("{DEVTOOLS_TAP_FIX_JS};\nglobalThis.__signalboxPinMode = '{mode}';\n{DEVTOOLS_PINS_JS}")
+}
+
 thread_local! {
     /// Frames `await_result` read while waiting for a reply to its own command.
     /// Each CDP connection has its own thread, so this is per-connection; the
@@ -204,6 +219,8 @@ pub enum ConnCmd {
         event: String,
         payload: Value,
     },
+    /// Run JS in the app, ignoring the result.
+    Eval(String),
     /// Synchronous CDP call on behalf of a DAP session (scopes/variables/eval):
     /// send `method`+`params`, reply with the CDP `result`.
     DebugRequest {
@@ -481,7 +498,7 @@ fn conn_loop(
                     };
                     // After connecting: the fix also points React Native's
                     // overlay at the agent this connection created.
-                    evaluate(&mut socket, &mut seq, DEVTOOLS_TAP_FIX_JS);
+                    evaluate(&mut socket, &mut seq, &devtools_scripts());
                     if let Some(why) = why {
                         let _ = tx.send(RnEvent::Devtools(
                             key.into(),
@@ -490,6 +507,7 @@ fn conn_loop(
                         ));
                     }
                 }
+                ConnCmd::Eval(expr) => evaluate(&mut socket, &mut seq, &expr),
                 ConnCmd::DevtoolsDetach => {
                     devtools = false;
                     cdp_send(
@@ -564,7 +582,7 @@ fn conn_loop(
                     && t.contains("operations")
                 {
                     devtools_fix_pending = false;
-                    evaluate(&mut socket, &mut seq, DEVTOOLS_TAP_FIX_JS);
+                    evaluate(&mut socket, &mut seq, &devtools_scripts());
                 }
                 // Surface the app's main bundle URL for the DAP source-map fetch.
                 if bundle.lock().unwrap().is_none() {
@@ -1050,27 +1068,74 @@ fn symbolicate(port: u16, frames: &[Value]) -> Option<Vec<String>> {
     }
 }
 
-/// Where an inspected component was defined, mapped from the bundle back to
-/// its source file (`signalboxSource`: "file:line").
+/// Where an inspected component is defined (`signalboxSource`) and used
+/// (`signalboxUsage`, the JSX line that created it, from the element's stack
+/// the injected script adds as `signalboxStack`), mapped from the bundle back
+/// to source files ("file:line"). One request to Metro for both.
 fn symbolicate_source(port: u16, value: &mut Value) {
+    let mut frames = Vec::new();
     let s = &value["source"];
-    let (Some(url), Some(line)) = (s["sourceURL"].as_str(), s["line"].as_i64()) else {
+    let has_source = if let (Some(url), Some(line)) = (s["sourceURL"].as_str(), s["line"].as_i64())
+    {
+        frames.push(json!({
+            "file": url,
+            "lineNumber": line,
+            "column": s["column"].as_i64().unwrap_or(0),
+            "methodName": "",
+        }));
+        true
+    } else {
+        false
+    };
+    if let Some(stack) = value["signalboxStack"].as_str() {
+        frames.extend(stack_text_frames(stack).into_iter().take(12).map(|(url, line, column)| {
+            json!({"file": url, "lineNumber": line, "column": column, "methodName": ""})
+        }));
+    }
+    if frames.is_empty() {
+        return;
+    }
+    let Some(mapped) = post_symbolicate(port, frames) else {
         return;
     };
-    let frame = json!({
-        "file": url,
-        "lineNumber": line,
-        "column": s["column"].as_i64().unwrap_or(0),
-        "methodName": "",
-    });
-    let mapped = post_symbolicate(port, vec![frame]);
-    if let Some(f) = mapped.as_ref().and_then(|m| m.first()) {
-        if let (Some(file), Some(line)) = (f["file"].as_str(), f["lineNumber"].as_i64()) {
-            if !file.is_empty() && !file.contains(".bundle") {
-                value["signalboxSource"] = json!(format!("{file}:{line}"));
-            }
+    let location = |f: &Value| -> Option<String> {
+        let file = f["file"].as_str()?;
+        let line = f["lineNumber"].as_i64()?;
+        (!file.is_empty() && !file.contains(".bundle")).then(|| format!("{file}:{line}"))
+    };
+    let mut rest = mapped.iter();
+    if has_source {
+        if let Some(l) = rest.next().and_then(location) {
+            value["signalboxSource"] = json!(l);
         }
     }
+    // The first frame outside React and libraries: the parent's JSX.
+    if let Some(l) = rest
+        .filter(|f| !f["file"].as_str().unwrap_or("").contains("/node_modules/"))
+        .find_map(location)
+    {
+        value["signalboxUsage"] = json!(l);
+    }
+}
+
+/// Bundle positions in a JS `Error.stack` text: `(url, line, column)` from
+/// lines like `    at name (http://…bundle…:12:34)`.
+fn stack_text_frames(stack: &str) -> Vec<(String, i64, i64)> {
+    stack
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim().strip_prefix("at ")?;
+            let loc = match l.rfind('(') {
+                Some(i) => l[i + 1..].trim_end_matches(')'),
+                None => l,
+            };
+            let loc = loc.strip_prefix("address at ").unwrap_or(loc);
+            let (rest, column) = loc.rsplit_once(':')?;
+            let (url, line) = rest.rsplit_once(':')?;
+            Some((url.to_string(), line.parse().ok()?, column.parse().ok()?))
+        })
+        .filter(|(url, _, _)| url.starts_with("http"))
+        .collect()
 }
 
 /// Map a `Debugger.paused` callFrame list to the top original `(file, line)`.
@@ -1888,5 +1953,30 @@ mod tests {
         assert_eq!(base64_lite::decode("aGVsbG8gd29ybGQ="), "hello world");
         assert_eq!(base64_lite::decode("eyJhIjoxfQ=="), "{\"a\":1}");
         assert_eq!(base64_lite::decode(""), "");
+    }
+
+    #[test]
+    fn reads_bundle_positions_from_a_js_stack() {
+        let stack = "Error: react-stack-top-frame\n    at jsxDEV (http://localhost:8081/index.bundle?platform=ios:2017:21)\n    at List (address at http://localhost:8081/index.bundle?platform=ios:9001:7)\n    at native\n    at http://localhost:8081/index.bundle?platform=ios:5:1";
+        assert_eq!(
+            stack_text_frames(stack),
+            vec![
+                (
+                    "http://localhost:8081/index.bundle?platform=ios".to_string(),
+                    2017,
+                    21
+                ),
+                (
+                    "http://localhost:8081/index.bundle?platform=ios".to_string(),
+                    9001,
+                    7
+                ),
+                (
+                    "http://localhost:8081/index.bundle?platform=ios".to_string(),
+                    5,
+                    1
+                ),
+            ]
+        );
     }
 }

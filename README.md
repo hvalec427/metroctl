@@ -162,7 +162,7 @@ Each pane owns its own keys (shown in that pane's footer); only a few are global
 
 | Key | Action |
 |---|---|
-| `⇥` / `⇧⇥` | move focus between panes |
+| `⇥` / `⇧⇥` | move focus between panes (in the logs pane: its list, then its detail pane) |
 | `Ctrl`+`←→↑↓` | resize the panes (horizontal / vertical split) |
 | `R` / `D` | send Metro reload / dev-menu (goes to the Metro process) |
 | `q` / `Ctrl-C` | quit — asks `y/n` first, then stops the processes simon started |

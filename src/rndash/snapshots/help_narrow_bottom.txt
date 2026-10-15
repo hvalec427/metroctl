@@ -1,11 +1,11 @@
 ┌ Proces┌ Keys ────────────────────────────────────────────────────────┐───────┐
-│       │   y           copy                                           │       │
-│Press  │   c           clear                                          │       │
-│       │   p           clear on reload on/off                         │       │
-│       │                                                              │ UDID-1│
-│       │ Open entry                                                   │       │
-│       │   ⏎ / Esc     close                                          │       │
-│       │   J K         scroll the entry (split view)                  │       │
+│       │   c           clear                                          │       │
+│Press  │   p           clear on reload on/off                         │       │
+│       │                                                              │       │
+│       │ Detail pane                                                  │ UDID-1│
+│       │   ⏎           open file:line in nvim, else copy the line     │       │
+│       │   Esc         back to the list                               │       │
+│       │   J K         scroll it from the list                        │       │
 │       │   {  }        previous / next section                        │       │
 │       │   o           open file:line in nvim                         │       │
 │       │   F           show framework stack frames                    │       │
@@ -19,8 +19,8 @@
 │       │   s           select by tapping it in the app                │       │
 │       │   h l  ← →    fold / unfold, or out / in                     │       │
 │       │   u           parent                                         │       │
-│       │   ⏎           props, state, hooks, source                    │       │
-│       │   o           open its source in nvim                        │       │
+│       │   o / O       open where it's used / defined                 │       │
+│       │   ⏎           detail pane: edit the prop on the line         │       │
 │       │                                                              │       │
 │       │ Debugger (paused)                                            │       │
 │       │   F5          continue                                       │       │

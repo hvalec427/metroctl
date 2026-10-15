@@ -8,7 +8,7 @@ signalbox logs [--port 8081]
 
 Dev-only (Metro must be running); network depth depends on your RN version's CDP support. Piped or redirected, it falls back to a plain line stream.
 
-In a terminal it opens an **interactive viewer** (dark theme) with **Logs**, **Network**, **Perf** and **Components** tabs. The Logs/Network/Components tabs have two modes (list and preview).
+In a terminal it opens an **interactive viewer** (dark theme) with **Logs**, **Network**, **Perf** and **Components** tabs. The Logs/Network/Components tabs show two panes side by side: the list, and the detail of its selected row. `⇥` (or `⏎`) moves focus to the detail pane, `⇥` or `esc` back to the list. In the dashboard, `⇥` goes through both along with the dashboard's other panes. Narrower than 60 columns, the focused pane takes the whole width.
 
 ## Perf tab
 
@@ -26,21 +26,28 @@ The app's React component tree, like the Components panel in React Native DevToo
 | Key | Action |
 |---|---|
 | `s` | select a component by tapping it in the app (`s` again cancels) |
-| `↑↓` / `jk` | move; the component under the cursor is outlined on the device |
+| `↑↓` / `jk` | move; the component under the cursor is outlined on the device until you leave the tab |
 | `h` / `←` | fold the component, or go to its parent |
 | `l` / `→` | unfold it, or go to its first child |
 | `u` | go to the parent |
-| `⏎` / `z` | inspect it: props, state, hooks, context, errors, who rendered it, and where it's defined |
-| `o` | open where it's defined in nvim (from the tree or the panel) |
+| `o` | open where it's used in nvim: the JSX line in the parent that rendered it |
+| `O` | open where it's defined |
+| `⏎` | in the detail pane: edit the prop on the cursor line (see below), or open the file of a `used in`/`defined in` line |
 | `/` · `f` | search · filter by component name |
+
+The detail pane shows the selected component's props, state, hooks, context, errors, who rendered it, and where it's used and defined.
 
 - The inspected component refreshes every second, so props and state stay current.
 - Values the backend sends as a preview (deep objects) are fetched once more, so props read a level or two deeper; past that they show as `{…}`.
+- **Editing (experimental).** In the detail pane, move to any line under Props, at any depth, and press `⏎`: the prompt reads `path = value` with the prop's path (`style.0.color`) and, when it's plain data, its current value as JSON. Change the value (JSON, or else plain text) and press ⏎; you can change the path too. Functions and elements show no value, but can still be replaced, e.g. with `null`. An edited prop is marked `✎` with the value it had, e.g. `✎ color: "red"  (was "#1C2026")`. In React DevTools an edited prop lasts only until the parent renders again; signalbox keeps it, until you put the old value back, reload, or the component leaves its place in the tree. `SIGNALBOX_PIN` picks how edits are kept:
+  - `a` (default): after each render, re-apply an edited prop the parent reset. Works for any component.
+  - `b`: swap the component's type for a wrapper that passes its edited props on every render, the way Fast Refresh swaps edited code. Function components only; editing the component's own file remounts it.
+  - `off`: plain React DevTools edits.
 - The backend talks to one frontend at a time, so signalbox connects only while this tab is open. Opening the Components panel in React Native DevTools (`j` in Metro) takes it over; switch tabs and back to take it back.
 
-### List mode (default, and the side-by-side split)
+### The list
 
-Keys drive the list:
+With the list focused:
 
 | Key | Action |
 |---|---|
@@ -62,16 +69,16 @@ Keys drive the list:
 
 `HEAD` and `OPTIONS` are standard HTTP methods you'll see in real traffic (`HEAD` fetches only headers, no body; `OPTIONS` is a CORS/preflight probe). The active `e`/`m` filters also appear in the header bar (e.g. `errors+POST`).
 
-**`⏎`** opens a **side-by-side detail pane** for the selected row (list left, details right). `j`/`k` still move the list and the pane follows; `J`/`K` scroll the pane; `⏎`/`esc` closes.
+The detail pane follows the selected row; `J`/`K` scroll it without leaving the list.
 
-### Preview mode (`z` — maximized)
+### The detail pane
 
-**`z`** maximizes the pane to full width (list hidden). Now the keys drive the pane: `j`/`k`/`g`·`G` move a line cursor and `J`/`K`/PgUp·PgDn scroll, `/` + `n`/`N` search within it, **`c` copies** (a network request → `curl`), `y` copies the whole pane. Press **`V`** to start a line selection — `j`/`k` extend it, `y` yanks just those lines. `z` returns to the split.
+With the detail pane focused (`⇥` or `⏎`), the keys drive it: `j`/`k`/`g`·`G`/PgUp·PgDn move a line cursor, `{`/`}` jump between sections, `/` + `n`/`N` search within it, **`c` copies** (a network request → `curl`), `y` copies the whole pane. **`⏎`** acts on the cursor line: a `file:line` (a stack frame, a component's source) opens in nvim, anything else is copied. Press **`V`** to start a line selection — `j`/`k` extend it, `y` yanks just those lines. `esc` goes back to the list.
 
 ### Search, objects, and the Network tab
 
 - Search highlights **every** match — the active one (where the selection / `n`·`N` sits) in **yellow**, the rest in **cyan**.
-- **Where search looks depends on the pane.** With the preview **closed**, `/` searches the list — it jumps live to the first match and `n`/`N` step the selection through every match (including ones in the status, duration, or GraphQL-op columns). With the preview **open** (split *or* maximized), `/` searches the pane from its top and `n`/`N` step through the pane's matches; the list stays put.
+- **Where search looks depends on the focused pane.** In the list, `/` jumps live to the first match and `n`/`N` step the selection through every match (including ones in the status, duration, or GraphQL-op columns). In the detail pane, `/` searches the pane from its top and `n`/`N` step through the pane's matches; the list stays put.
 - A **log with an object** shows the full nested object tree, fetched lazily via `Runtime.getProperties`; nested previews already present in the log event render inline for free.
 - A **network** row shows method, URL, status, **duration**, response **size**, and (in the pane) request/response **headers and bodies** (JSON pretty-printed). Long values wrap so nothing is cut off. **Failed** requests show `FAIL` and the error reason.
 - **WebSockets** appear as `WS` rows; the pane lists each frame with a direction arrow (`↑` sent, `↓` received) — handy for GraphQL subscriptions.
