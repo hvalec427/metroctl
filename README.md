@@ -274,30 +274,12 @@ To see and use the app's screen (screenshots, element tree, taps, typing,
 deep links), use [boop](https://github.com/hvalec427/boop). Point it at
 the session's device with `boop --device-from .signalbox/session.json …`.
 
-### Claude Code plugin (`rn-sim`)
+### Claude Code
 
-The `rn-sim` plugin sets all of this up for Claude Code: each session in a
-React Native checkout gets its own simulator and Metro port, started when the
-agent needs the app and never shared with another session.
-
-```
-/plugin marketplace add https://github.com/hvalec427/signalbox.git#develop
-/plugin install rn-sim@signalbox
-```
-
-`/plugin uninstall rn-sim@signalbox` removes it; it adds nothing to your repos.
-For parallel tasks, start each in a worktree of its own: `claude --worktree <name>`.
-
-- When a session starts in a React Native checkout, it points boop at that
-  checkout's session, clones `node_modules`, `ios/Pods` and `.env*` from the
-  main checkout into a new worktree, and tells the agent whether the app is
-  running. Elsewhere it does nothing.
-- Questions are answered from the code. Before checking something in the app,
-  the `run-app` skill has the agent run `signalbox up --detach --port auto
-  --new-sim --prebuilt`, then use the MCP tools above and boop.
-- When the session ends, the app it started is stopped and its simulator
-  deleted. A dashboard you started yourself is left alone.
-- The main checkout needs `signalbox init` once.
+[rn-agent](https://github.com/hvalec427/rn-agent) sets all of this up for
+Claude Code: a plugin that gives each session in a React Native checkout its
+own simulator and Metro port, through `up --detach`, and an installer for
+signalbox, simon and boop.
 
 ## Contributing
 
